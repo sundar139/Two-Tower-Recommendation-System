@@ -13,12 +13,22 @@ Implemented in this step:
 - Data and environment validation checks
 - Unit tests for preprocessing, features, splits, and safety constraints
 
+Implemented in Step 2 (plain retrieval baseline):
+
+- Popularity baseline retrieval evaluator
+- Plain two-tower retriever with in-batch negatives
+- Retrieval Dataset/DataLoader with leakage-safe history windows
+- Offline metrics: HR@10, MRR@10, NDCG@10, Recall@50
+- FAISS flat inner-product index export/reload/search
+- MLflow logging for training and evaluation runs
+
 Not yet implemented in this step:
 
-- Two-tower retrieval model
 - Contrastive learning objective
 - FastAPI serving layer
 - Ollama explanation endpoints
+- Custom transformer sequence encoder
+- Neural ranker
 
 ## Dataset Note
 
@@ -27,6 +37,7 @@ Raw MovieLens archives and extracted CSV files are not committed. Processed arti
 ## Windows PowerShell Setup
 
 ```powershell
+Copy-Item env.example .env -Force
 uv sync --extra dev
 ```
 
@@ -54,7 +65,17 @@ uv run python scripts/prepare_data.py --config configs/data.yaml --force
 ## Verify Environment
 
 ```powershell
+uv run python verify.py
 uv run python scripts/verify_environment.py
+```
+
+## Step 2 Retrieval Commands
+
+```powershell
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml
 ```
 
 ## Run Quality Checks
@@ -82,6 +103,23 @@ Expected files:
 - user_histories.parquet
 - dataset_stats.json
 
+## Retrieval Metrics
+
+- HR@10: hit-rate at top-10.
+- MRR@10: reciprocal rank at top-10.
+- NDCG@10: position-weighted ranking gain at top-10.
+- Recall@50: recall at top-50.
+
+## Artifact Policy
+
+Do not commit generated data or experiment artifacts:
+
+- `data/raw/ml-25m.zip`, `data/raw/ml-25m/`
+- `data/processed/**` generated outputs
+- `artifacts/**`
+- `mlruns/**`
+- model checkpoints and FAISS index files
+
 ## Next Planned Step
 
-Implement the plain two-tower retriever training pipeline.
+Extend the plain baseline with transformer-based sequence encoding and contrastive learning.
