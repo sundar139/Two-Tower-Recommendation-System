@@ -22,9 +22,10 @@ def test_faiss_matches_bruteforce(tmp_path: Path) -> None:
     paths = save_faiss_bundle(index, mapping, tmp_path, embedding_dim=16)
 
     loaded_index, loaded_mapping = load_faiss_bundle(tmp_path)
-    top_items, _scores, _lat = search_index(loaded_index, query, loaded_mapping, 10)
+    top_items, _scores, latency_ms = search_index(loaded_index, query, loaded_mapping, 10)
 
     brute = (items @ query[0]).argsort()[::-1][:10]
     assert top_items.shape == (1, 10)
     assert top_items[0].tolist() == brute.tolist()
     assert paths["index"].exists()
+    assert latency_ms < 100.0

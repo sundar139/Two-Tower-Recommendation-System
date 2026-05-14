@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import polars as pl
 import torch
@@ -11,9 +12,21 @@ import typer
 
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json
 from movie_recsys.modeling.datasets import load_feature_tables
-from movie_recsys.modeling.faiss_index import build_flat_ip_index, save_faiss_bundle, search_index
+from movie_recsys.modeling.faiss_index import (
+    build_flat_ip_index,
+    load_faiss_bundle,
+    save_faiss_bundle,
+    search_index,
+)
 from movie_recsys.modeling.retrieval import TwoTowerRetriever
 from movie_recsys.training.config import load_retrieval_config
+from movie_recsys.training.mlflow_utils import (
+    log_artifacts,
+    log_metrics,
+    log_training_params,
+    set_retrieval_tags,
+    setup_mlflow,
+)
 
 app = typer.Typer(add_completion=False)
 
@@ -25,6 +38,7 @@ def main(
     sample: bool = typer.Option(False, "--sample"),
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
+    setup_mlflow(cfg)
     tables = load_feature_tables(cfg)
 
     model = TwoTowerRetriever(
@@ -83,7 +97,8 @@ def main(
             .numpy()
         )
 
-    top_items, _scores, latency = search_index(index, user_emb, item_indices, 200)
+    reloaded_index, reloaded_mapping = load_faiss_bundle(cfg.paths.index_output_dir)
+    top_items, _scores, latency = search_index(reloaded_index, user_emb, reloaded_mapping, 200)
     brute = (item_emb @ user_emb[0]).argsort()[::-1][:10]
     faiss_top10 = top_items[0][:10]
 
@@ -96,6 +111,26 @@ def main(
     }
     report_path = cfg.paths.report_output_dir / "faiss_export_report.json"
     save_json(report_path, payload)
+
+    with mlflow.start_run(run_name="faiss_export"):
+        set_retrieval_tags(model_type="two_tower", split="val", sample=sample)
+        log_training_params(cfg)
+        log_metrics(
+            {
+                "faiss_top200_latency_ms": float(latency),
+                "faiss_top10_match": 1.0 if payload["top10_match"] else 0.0,
+            }
+        )
+        mlflow.log_param("faiss_artifact_path", str(cfg.paths.index_output_dir))
+        log_artifacts(
+            [
+                Path(paths["index"]),
+                Path(paths["mapping"]),
+                Path(paths["metadata"]),
+                report_path,
+            ]
+        )
+
     typer.echo(payload)
 
 
