@@ -37,6 +37,11 @@ def log_training_params(config: RetrievalConfig) -> None:
         "epochs": config.train.epochs,
         "temperature": config.model.temperature,
         "history_length": config.train.history_length,
+        "scheduler": config.train.scheduler,
+        "scheduler_t_max": config.train.scheduler_t_max,
+        "scheduler_patience": config.train.scheduler_patience,
+        "scheduler_factor": config.train.scheduler_factor,
+        "min_learning_rate": config.train.min_learning_rate,
     }
     mlflow.log_params(params)
 
