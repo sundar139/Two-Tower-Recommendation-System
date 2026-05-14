@@ -36,6 +36,9 @@ uv sync --extra dev
 uv run python scripts/download_movielens.py --config configs/data.yaml
 ```
 
+Checksum validation is supported and automatically enforced when `expected_checksum`
+is configured in `configs/data.yaml`.
+
 ## Prepare Sample Data
 
 ```powershell

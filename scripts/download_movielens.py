@@ -34,6 +34,12 @@ def main(
 	typer.echo("MovieLens download summary")
 	typer.echo(f"  downloaded: {'yes' if summary.downloaded else 'no (already present)'}")
 	typer.echo(f"  extracted: {'yes' if summary.extracted else 'no (already present)'}")
+	if summary.checksum_status == "verified":
+		typer.echo("  checksum: verified")
+	elif summary.checksum_status == "skipped_by_flag":
+		typer.echo("  checksum: skipped (--skip-checksum)")
+	else:
+		typer.echo("  checksum: skipped (expected checksum not configured)")
 	typer.echo(f"  zip_path: {summary.zip_path}")
 	typer.echo(f"  extract_dir: {summary.extract_dir}")
 	typer.echo(f"  files_found ({len(summary.files_found)}): {', '.join(summary.files_found)}")

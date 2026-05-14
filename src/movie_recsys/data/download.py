@@ -18,6 +18,7 @@ from movie_recsys.constants import REQUIRED_MOVIELENS_FILES
 class DownloadSummary:
 	downloaded: bool
 	extracted: bool
+	checksum_status: str
 	files_found: list[str]
 	missing_files: list[str]
 	zip_path: Path
@@ -43,6 +44,7 @@ def download_movielens(
 
 	downloaded = False
 	extracted = False
+	checksum_status = "skipped_unavailable"
 
 	if force and zip_path.exists():
 		zip_path.unlink()
@@ -66,6 +68,9 @@ def download_movielens(
 				"Checksum mismatch for downloaded archive. "
 				f"Expected {expected}, got {actual}."
 			)
+		checksum_status = "verified"
+	elif skip_checksum and config.expected_checksum:
+		checksum_status = "skipped_by_flag"
 
 	if not extract_dir.exists() or force:
 		_safe_extract_zip(zip_path, raw_dir)
@@ -75,6 +80,7 @@ def download_movielens(
 	return DownloadSummary(
 		downloaded=downloaded,
 		extracted=extracted,
+		checksum_status=checksum_status,
 		files_found=files_found,
 		missing_files=missing_files,
 		zip_path=zip_path,
