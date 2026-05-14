@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import polars as pl
@@ -12,7 +14,16 @@ from movie_recsys.modeling.datasets import FeatureTables
 from movie_recsys.modeling.faiss_index import build_flat_ip_index, search_index
 from movie_recsys.modeling.metrics import aggregate_ranking_metrics
 from movie_recsys.modeling.popularity import evaluate_popularity
-from movie_recsys.modeling.retrieval import TwoTowerRetriever
+
+
+class RetrieverModel(Protocol):
+    def eval(self) -> object: ...
+
+    def parameters(self) -> Iterator[torch.nn.Parameter]: ...
+
+    def encode_item(self, batch: dict[str, torch.Tensor]) -> torch.Tensor: ...
+
+    def encode_user(self, batch: dict[str, torch.Tensor]) -> torch.Tensor: ...
 
 
 @dataclass(slots=True)
@@ -70,7 +81,7 @@ def _build_user_tensor_inputs(
 
 
 def evaluate_two_tower(
-    model: TwoTowerRetriever,
+    model: RetrieverModel,
     train: pl.DataFrame,
     split: pl.DataFrame,
     users: pl.DataFrame,
@@ -109,12 +120,7 @@ def evaluate_two_tower(
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
-            user_emb = model.user_tower(
-                inputs["user_idx"],
-                inputs["history_item_idx"],
-                inputs["history_mask"],
-                inputs["user_features"],
-            )
+            user_emb = model.encode_user(inputs)
         retrieved, _scores, latency = search_index(index, user_emb.cpu().numpy(), mapping, top_k)
         total_latency += latency
         seen_items = seen.get(user_idx, set())

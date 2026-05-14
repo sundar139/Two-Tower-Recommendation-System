@@ -14,15 +14,16 @@ import typer
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json, save_markdown
 from movie_recsys.modeling.datasets import load_feature_tables
 from movie_recsys.modeling.evaluator import evaluate_popularity_baseline, evaluate_two_tower
-from movie_recsys.modeling.retrieval import TwoTowerRetriever
+from movie_recsys.modeling.retrieval import BaselineRetriever
+from movie_recsys.modeling.transformer_retrieval import TransformerRetriever
 from movie_recsys.training.config import load_retrieval_config
 from movie_recsys.training.mlflow_utils import (
-    get_active_run_id,
+    configure_mlflow,
     log_artifacts,
     log_metrics,
     log_training_params,
+    print_mlflow_run_summary,
     set_retrieval_tags,
-    setup_mlflow,
 )
 
 app = typer.Typer(add_completion=False)
@@ -38,8 +39,9 @@ def _format_metrics_table(
     popularity_metrics: dict[str, float],
     model_metrics: dict[str, float],
     delta: dict[str, float],
+    model_label: str,
 ) -> str:
-    rows = ["| Metric | Popularity | Two-Tower | Delta |", "|---|---:|---:|---:|"]
+    rows = [f"| Metric | Popularity | {model_label} | Delta |", "|---|---:|---:|---:|"]
     for metric in ["hr@10", "mrr@10", "ndcg@10", "recall@50"]:
         rows.append(
             "| "
@@ -47,6 +49,32 @@ def _format_metrics_table(
             f"{model_metrics[metric]:.6f} | {delta[metric]:.6f} |"
         )
     return "\n".join(rows)
+
+
+def _normalize_model_name(model: str) -> str:
+    if model in {"baseline", "two_tower"}:
+        return "baseline"
+    if model in {"transformer", "popularity"}:
+        return model
+    msg = f"Unsupported model name: {model}"
+    raise ValueError(msg)
+
+
+def _default_checkpoint(cfg, normalized_model: str) -> Path:
+    return cfg.paths.model_output_dir / f"best_{normalized_model}_retriever.pt"
+
+
+def _build_retriever(cfg, tables, normalized_model: str):
+    common_kwargs = {
+        "config": cfg,
+        "num_users": tables.user_features.shape[0],
+        "num_items_with_padding": tables.item_features.shape[0] + 1,
+        "user_feature_dim": tables.user_features.shape[1],
+        "item_feature_dim": tables.item_features.shape[1],
+    }
+    if normalized_model == "transformer":
+        return TransformerRetriever(**common_kwargs)
+    return BaselineRetriever(**common_kwargs)
 
 
 def _update_summary_report(
@@ -71,9 +99,12 @@ def main(
     model: str = typer.Option("popularity", "--model"),
     split: str = typer.Option("val", "--split"),
     sample: bool = typer.Option(False, "--sample"),
-    checkpoint: Path = typer.Option(Path("artifacts/models/best_retriever.pt"), "--checkpoint"),
+    checkpoint: Path | None = typer.Option(None, "--checkpoint"),
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
+    normalized_model = _normalize_model_name(model)
+    if normalized_model in {"baseline", "transformer"}:
+        cfg.model.model_type = normalized_model  # type: ignore[assignment]
 
     train_df = pl.read_parquet(cfg.train_path)
     split_df = pl.read_parquet(_split_path(cfg, split))
@@ -81,20 +112,20 @@ def main(
     users_df = pl.read_parquet(cfg.users_path)
 
     popularity = evaluate_popularity_baseline(train_df, split_df, items_df)
-    setup_mlflow(cfg)
+    experiment = configure_mlflow(cfg)
 
-    with mlflow.start_run(run_name=f"evaluate_{model}_{split}"):
-        set_retrieval_tags(model_type=model, split=split, sample=sample)
+    with mlflow.start_run(run_name=f"evaluate_{normalized_model}_{split}") as run:
+        set_retrieval_tags(model_type=normalized_model, split=split, sample=sample)
         log_training_params(cfg)
 
-        if model == "popularity":
+        if normalized_model == "popularity":
             metrics = popularity.metrics
             report = {
                 "model": "popularity",
                 "split": split,
                 "metrics": metrics,
             }
-            report_path = cfg.paths.report_output_dir / f"popularity_{split}.json"
+            report_path = cfg.paths.report_output_dir / f"retrieval_eval_popularity_{split}.json"
             save_json(report_path, report)
             _update_summary_report(
                 cfg.paths.report_output_dir
@@ -104,19 +135,17 @@ def main(
             )
             log_metrics({f"{split}_{k}": v for k, v in metrics.items()})
             log_artifacts([report_path])
+            print_mlflow_run_summary(
+                config=cfg,
+                run=run,
+                experiment_id=experiment.experiment_id,
+            )
             typer.echo(report)
-            typer.echo(f"mlflow_run_id: {get_active_run_id()}")
             return
 
         feature_tables = load_feature_tables(cfg)
-        model_obj = TwoTowerRetriever(
-            config=cfg,
-            num_users=feature_tables.user_features.shape[0],
-            num_items_with_padding=feature_tables.item_features.shape[0] + 1,
-            user_feature_dim=feature_tables.user_features.shape[1],
-            item_feature_dim=feature_tables.item_features.shape[1],
-        )
-        ckpt = load_checkpoint(checkpoint)
+        model_obj = _build_retriever(cfg, feature_tables, normalized_model)
+        ckpt = load_checkpoint(checkpoint or _default_checkpoint(cfg, normalized_model))
         model_obj.load_state_dict(ckpt["model_state_dict"])
         model_obj.eval()
 
@@ -136,40 +165,68 @@ def main(
             key: eval_result.metrics[key] - popularity.metrics[key] for key in eval_result.metrics
         }
         report = {
-            "model": "two_tower",
+            "model": normalized_model,
             "split": split,
-            "two_tower": eval_result.metrics,
+            normalized_model: eval_result.metrics,
             "popularity": popularity.metrics,
             "delta": delta,
             "avg_query_latency_ms": latency_ms,
-            "beats_popularity_ndcg@10": eval_result.metrics["ndcg@10"]
-            > popularity.metrics["ndcg@10"],
+            "beats_popularity_ndcg@10": (
+                eval_result.metrics["ndcg@10"] > popularity.metrics["ndcg@10"]
+            ),
         }
 
-        report_json = cfg.paths.report_output_dir / f"two_tower_{split}.json"
-        table_md = cfg.paths.report_output_dir / f"two_tower_{split}.md"
-        metrics_table = _format_metrics_table(popularity.metrics, eval_result.metrics, delta)
+        report_json = (
+            cfg.paths.report_output_dir / f"retrieval_eval_{normalized_model}_{split}.json"
+        )
+        table_md = cfg.paths.report_output_dir / f"retrieval_eval_{normalized_model}_{split}.md"
+        metrics_table = _format_metrics_table(
+            popularity.metrics,
+            eval_result.metrics,
+            delta,
+            model_label=normalized_model,
+        )
         save_json(report_json, report)
         _update_summary_report(
             cfg.paths.report_output_dir
-            / f"two_tower_{'sample' if sample else 'full'}_summary.json",
+            / f"{normalized_model}_{'sample' if sample else 'full'}_summary.json",
             split=split,
             payload=report,
         )
+
+        if normalized_model == "baseline":
+            # Backward-compatible report names used by earlier Step 2 scripts.
+            save_json(cfg.paths.report_output_dir / f"two_tower_{split}.json", report)
+            _update_summary_report(
+                cfg.paths.report_output_dir
+                / f"two_tower_{'sample' if sample else 'full'}_summary.json",
+                split=split,
+                payload=report,
+            )
+
         save_markdown(
             table_md,
             metrics_table
-            + f"\n\nTwo-tower beats popularity on NDCG@10: {report['beats_popularity_ndcg@10']}\n",
+            + "\n\n"
+            + f"{normalized_model} beats popularity on NDCG@10: "
+            + f"{report['beats_popularity_ndcg@10']}\n",
         )
 
         log_metrics({f"{split}_{k}": v for k, v in eval_result.metrics.items()})
         log_metrics({f"{split}_pop_{k}": v for k, v in popularity.metrics.items()})
         log_artifacts([report_json, table_md])
+        print_mlflow_run_summary(
+            config=cfg,
+            run=run,
+            experiment_id=experiment.experiment_id,
+        )
 
         typer.echo(report)
         typer.echo(metrics_table)
-        typer.echo(f"Two-tower beats popularity on NDCG@10: {report['beats_popularity_ndcg@10']}")
-        typer.echo(f"mlflow_run_id: {get_active_run_id()}")
+        typer.echo(
+            f"{normalized_model} beats popularity on NDCG@10: "
+            f"{report['beats_popularity_ndcg@10']}"
+        )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 import mlflow
 import numpy as np
@@ -13,21 +14,28 @@ from torch import nn
 
 from movie_recsys.modeling.artifacts import save_checkpoint, save_config_snapshot, save_json
 from movie_recsys.modeling.datasets import (
+    FeatureTables,
     RetrievalDataset,
     load_feature_tables,
     make_retrieval_dataloader,
 )
-from movie_recsys.modeling.evaluator import evaluate_popularity_baseline, evaluate_two_tower
+from movie_recsys.modeling.evaluator import (
+    RetrieverModel,
+    evaluate_popularity_baseline,
+    evaluate_two_tower,
+)
 from movie_recsys.modeling.losses import InBatchCrossEntropyLoss
-from movie_recsys.modeling.retrieval import TwoTowerRetriever
+from movie_recsys.modeling.retrieval import BaselineRetriever
+from movie_recsys.modeling.transformer_retrieval import TransformerRetriever
 from movie_recsys.training.config import RetrievalConfig
 from movie_recsys.training.mlflow_utils import (
+    configure_mlflow,
     flatten_config_for_snapshot,
     log_artifacts,
     log_metrics,
     log_training_params,
+    print_mlflow_run_summary,
     set_retrieval_tags,
-    setup_mlflow,
 )
 from movie_recsys.utils.reproducibility import set_global_seed
 
@@ -37,6 +45,9 @@ class TrainingResult:
     best_checkpoint: Path
     best_metrics: dict[str, float]
     final_train_loss: float
+    model_type: str
+    mlflow_run_id: str
+    mlflow_run_url: str
 
 
 def _build_scheduler(
@@ -76,9 +87,37 @@ def _to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
     return {key: value.to(device) for key, value in batch.items()}
 
 
+def _normalize_model_type(model_type: str) -> Literal["baseline", "transformer"]:
+    if model_type in {"two_tower", "baseline"}:
+        return "baseline"
+    if model_type == "transformer":
+        return "transformer"
+    msg = f"Unsupported model type: {model_type}"
+    raise ValueError(msg)
+
+
+def _build_retriever_model(
+    config: RetrievalConfig,
+    feature_tables: FeatureTables,
+    model_type: Literal["baseline", "transformer"],
+) -> nn.Module:
+    common_kwargs = {
+        "config": config,
+        "num_users": feature_tables.user_features.shape[0],
+        "num_items_with_padding": feature_tables.item_features.shape[0] + 1,
+        "user_feature_dim": feature_tables.user_features.shape[1],
+        "item_feature_dim": feature_tables.item_features.shape[1],
+    }
+    if model_type == "transformer":
+        return TransformerRetriever(**common_kwargs)
+    return BaselineRetriever(**common_kwargs)
+
+
 def build_model(
     config: RetrievalConfig,
-) -> tuple[TwoTowerRetriever, RetrievalDataset, RetrievalDataset]:
+    *,
+    model_type: str | None = None,
+) -> tuple[nn.Module, RetrievalDataset, RetrievalDataset]:
     feature_tables = load_feature_tables(config)
     train_ds = RetrievalDataset(
         str(config.train_path),
@@ -91,21 +130,25 @@ def build_model(
         history_length=config.train.history_length,
     )
 
-    num_users = feature_tables.user_features.shape[0]
-    num_items_with_padding = feature_tables.item_features.shape[0] + 1
-
-    model = TwoTowerRetriever(
-        config=config,
-        num_users=num_users,
-        num_items_with_padding=num_items_with_padding,
-        user_feature_dim=feature_tables.user_features.shape[1],
-        item_feature_dim=feature_tables.item_features.shape[1],
+    normalized_model_type = _normalize_model_type(model_type or config.model.model_type)
+    model = _build_retriever_model(
+        config,
+        feature_tables,
+        model_type=normalized_model_type,
     )
     return model, train_ds, val_ds
 
 
-def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
+def train_retriever(
+    config: RetrievalConfig,
+    *,
+    sample: bool,
+    model_type: str | None = None,
+) -> TrainingResult:
     set_global_seed(config.train.random_seed)
+    normalized_model_type = _normalize_model_type(model_type or config.model.model_type)
+    config = config.model_copy(deep=True)
+    config.model.model_type = normalized_model_type
 
     feature_tables = load_feature_tables(config)
     train_ds = RetrievalDataset(
@@ -122,15 +165,10 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
         seed=config.train.random_seed,
     )
 
-    num_users = feature_tables.user_features.shape[0]
-    num_items_with_padding = feature_tables.item_features.shape[0] + 1
-
-    model = TwoTowerRetriever(
-        config=config,
-        num_users=num_users,
-        num_items_with_padding=num_items_with_padding,
-        user_feature_dim=feature_tables.user_features.shape[1],
-        item_feature_dim=feature_tables.item_features.shape[1],
+    model = _build_retriever_model(
+        config,
+        feature_tables,
+        model_type=normalized_model_type,
     )
 
     device = _select_device(config.train.device)
@@ -154,11 +192,11 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
 
     best_ndcg = -1.0
     best_metrics: dict[str, float] = {}
-    best_checkpoint = config.paths.model_output_dir / "best_retriever.pt"
-    setup_mlflow(config)
+    best_checkpoint = config.paths.model_output_dir / f"best_{normalized_model_type}_retriever.pt"
+    experiment = configure_mlflow(config)
 
-    with mlflow.start_run(run_name="plain_two_tower_train"):
-        set_retrieval_tags(model_type="two_tower", split="val", sample=sample)
+    with mlflow.start_run(run_name=f"{normalized_model_type}_retriever_train") as run:
+        set_retrieval_tags(model_type=normalized_model_type, split="val", sample=sample)
         log_training_params(config)
 
         for epoch in range(config.train.epochs):
@@ -185,7 +223,7 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
             log_metrics({"train_loss": epoch_loss}, step=epoch)
 
             eval_result, _embeddings, _latency = evaluate_two_tower(
-                model,
+                cast(RetrieverModel, model),
                 train_df,
                 val_df,
                 users_df,
@@ -216,22 +254,33 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
 
         popularity_result = evaluate_popularity_baseline(train_df, val_df, items_df)
         report_payload = {
+            "model_type": normalized_model_type,
             "best_val_metrics": best_metrics,
             "popularity_val_metrics": popularity_result.metrics,
             "sample": sample,
             "device": str(device),
             "scheduler": config.train.scheduler,
         }
-        report_path = config.paths.report_output_dir / "train_report.json"
+        report_path = config.paths.report_output_dir / f"train_report_{normalized_model_type}.json"
         save_json(report_path, report_payload)
 
-        config_snapshot = config.paths.model_output_dir / "train_config_snapshot.json"
+        config_snapshot = (
+            config.paths.model_output_dir / f"train_config_snapshot_{normalized_model_type}.json"
+        )
         save_config_snapshot(config_snapshot, flatten_config_for_snapshot(config))
 
         log_artifacts([best_checkpoint, report_path, config_snapshot])
+        run_summary = print_mlflow_run_summary(
+            config=config,
+            run=run,
+            experiment_id=experiment.experiment_id,
+        )
 
     return TrainingResult(
         best_checkpoint=best_checkpoint,
         best_metrics=best_metrics,
         final_train_loss=epoch_loss,
+        model_type=normalized_model_type,
+        mlflow_run_id=run_summary["mlflow_run_id"],
+        mlflow_run_url=run_summary["mlflow_run_url"],
     )

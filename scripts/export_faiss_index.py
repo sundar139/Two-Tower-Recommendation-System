@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, cast
 
 import mlflow
 import numpy as np
@@ -18,14 +19,16 @@ from movie_recsys.modeling.faiss_index import (
     save_faiss_bundle,
     search_index,
 )
-from movie_recsys.modeling.retrieval import TwoTowerRetriever
+from movie_recsys.modeling.retrieval import BaselineRetriever
+from movie_recsys.modeling.transformer_retrieval import TransformerRetriever
 from movie_recsys.training.config import load_retrieval_config
 from movie_recsys.training.mlflow_utils import (
+    configure_mlflow,
     log_artifacts,
     log_metrics,
     log_training_params,
+    print_mlflow_run_summary,
     set_retrieval_tags,
-    setup_mlflow,
 )
 
 app = typer.Typer(add_completion=False)
@@ -34,21 +37,34 @@ app = typer.Typer(add_completion=False)
 @app.command()
 def main(
     config: Path = typer.Option(Path("configs/retrieval.yaml"), "--config"),
-    checkpoint: Path = typer.Option(Path("artifacts/models/best_retriever.pt"), "--checkpoint"),
+    checkpoint: Path | None = typer.Option(None, "--checkpoint"),
     sample: bool = typer.Option(False, "--sample"),
+    model_type: Literal["baseline", "transformer"] | None = typer.Option(None, "--model-type"),
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
-    setup_mlflow(cfg)
+    normalized_model_type = model_type or cfg.model.model_type
+    if normalized_model_type == "two_tower":
+        normalized_model_type = "baseline"
+    cfg.model.model_type = cast(Literal["baseline", "transformer"], normalized_model_type)
+    experiment = configure_mlflow(cfg)
     tables = load_feature_tables(cfg)
 
-    model = TwoTowerRetriever(
-        config=cfg,
-        num_users=tables.user_features.shape[0],
-        num_items_with_padding=tables.item_features.shape[0] + 1,
-        user_feature_dim=tables.user_features.shape[1],
-        item_feature_dim=tables.item_features.shape[1],
+    common_kwargs = {
+        "config": cfg,
+        "num_users": tables.user_features.shape[0],
+        "num_items_with_padding": tables.item_features.shape[0] + 1,
+        "user_feature_dim": tables.user_features.shape[1],
+        "item_feature_dim": tables.item_features.shape[1],
+    }
+    if normalized_model_type == "transformer":
+        model = TransformerRetriever(**common_kwargs)
+    else:
+        model = BaselineRetriever(**common_kwargs)
+
+    checkpoint_path = checkpoint or (
+        cfg.paths.model_output_dir / f"best_{normalized_model_type}_retriever.pt"
     )
-    ckpt = load_checkpoint(checkpoint)
+    ckpt = load_checkpoint(checkpoint_path)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -102,17 +118,18 @@ def main(
     faiss_top10 = top_items[0][:10]
 
     payload = {
+        "model_type": normalized_model_type,
         "faiss_top10": [int(x) for x in faiss_top10],
         "brute_top10": [int(x) for x in brute],
         "top10_match": [int(x) for x in faiss_top10] == [int(x) for x in brute],
         "top200_latency_ms": latency,
         "paths": {k: str(v) for k, v in paths.items()},
     }
-    report_path = cfg.paths.report_output_dir / "faiss_export_report.json"
+    report_path = cfg.paths.report_output_dir / f"faiss_export_report_{normalized_model_type}.json"
     save_json(report_path, payload)
 
-    with mlflow.start_run(run_name="faiss_export"):
-        set_retrieval_tags(model_type="two_tower", split="val", sample=sample)
+    with mlflow.start_run(run_name=f"faiss_export_{normalized_model_type}") as run:
+        set_retrieval_tags(model_type=normalized_model_type, split="val", sample=sample)
         log_training_params(cfg)
         log_metrics(
             {
@@ -121,6 +138,7 @@ def main(
             }
         )
         mlflow.log_param("faiss_artifact_path", str(cfg.paths.index_output_dir))
+        mlflow.log_param("faiss_model_type", normalized_model_type)
         log_artifacts(
             [
                 Path(paths["index"]),
@@ -128,6 +146,11 @@ def main(
                 Path(paths["metadata"]),
                 report_path,
             ]
+        )
+        print_mlflow_run_summary(
+            config=cfg,
+            run=run,
+            experiment_id=experiment.experiment_id,
         )
 
     typer.echo(payload)
