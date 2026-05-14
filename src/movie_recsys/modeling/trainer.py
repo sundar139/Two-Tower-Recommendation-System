@@ -26,6 +26,7 @@ from movie_recsys.training.mlflow_utils import (
     log_artifacts,
     log_metrics,
     log_training_params,
+    set_retrieval_tags,
     setup_mlflow,
 )
 from movie_recsys.utils.reproducibility import set_global_seed
@@ -128,9 +129,10 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
     best_ndcg = -1.0
     best_metrics: dict[str, float] = {}
     best_checkpoint = config.paths.model_output_dir / "best_retriever.pt"
+    setup_mlflow(config)
 
     with mlflow.start_run(run_name="plain_two_tower_train"):
-        setup_mlflow(config, model_type="two_tower", split="val", sample=sample)
+        set_retrieval_tags(model_type="two_tower", split="val", sample=sample)
         log_training_params(config)
 
         for epoch in range(config.train.epochs):

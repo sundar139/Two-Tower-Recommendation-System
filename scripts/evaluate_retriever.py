@@ -19,6 +19,7 @@ from movie_recsys.training.mlflow_utils import (
     log_artifacts,
     log_metrics,
     log_training_params,
+    set_retrieval_tags,
     setup_mlflow,
 )
 
@@ -62,9 +63,10 @@ def main(
     users_df = pl.read_parquet(cfg.users_path)
 
     popularity = evaluate_popularity_baseline(train_df, split_df, items_df)
+    setup_mlflow(cfg)
 
     with mlflow.start_run(run_name=f"evaluate_{model}_{split}"):
-        setup_mlflow(cfg, model_type=model, split=split, sample=sample)
+        set_retrieval_tags(model_type=model, split=split, sample=sample)
         log_training_params(cfg)
 
         if model == "popularity":

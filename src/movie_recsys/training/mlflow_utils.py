@@ -10,9 +10,12 @@ import mlflow
 from movie_recsys.training.config import RetrievalConfig
 
 
-def setup_mlflow(config: RetrievalConfig, *, model_type: str, split: str, sample: bool) -> None:
+def setup_mlflow(config: RetrievalConfig) -> None:
     mlflow.set_tracking_uri(config.mlflow_tracking_uri)
     mlflow.set_experiment(config.mlflow_experiment_name)
+
+
+def set_retrieval_tags(*, model_type: str, split: str, sample: bool) -> None:
     mlflow.set_tags(
         {
             "step": "plain_two_tower_retriever",
@@ -39,11 +42,15 @@ def log_training_params(config: RetrievalConfig) -> None:
 
 
 def log_metrics(metrics: dict[str, float], step: int | None = None) -> None:
+    def _normalize_metric_name(name: str) -> str:
+        return name.replace("@", "_at_")
+
     for name, value in metrics.items():
+        metric_name = _normalize_metric_name(name)
         if step is None:
-            mlflow.log_metric(name, float(value))
+            mlflow.log_metric(metric_name, float(value))
         else:
-            mlflow.log_metric(name, float(value), step=step)
+            mlflow.log_metric(metric_name, float(value), step=step)
 
 
 def log_artifacts(paths: list[Path]) -> None:
