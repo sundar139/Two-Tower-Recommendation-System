@@ -117,12 +117,31 @@ uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sa
 ## Step 3 Transformer Commands
 
 ```powershell
-uv run python scripts/train_retriever.py --config configs/transformer_retrieval.yaml --sample --model-type transformer
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval.yaml --model transformer --split val --sample
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval.yaml --model transformer --split test --sample
-uv run python scripts/export_faiss_index.py --config configs/transformer_retrieval.yaml --sample --model-type transformer
+uv run python scripts/diagnose_transformer_retriever.py --config configs/transformer_retrieval.yaml --sample
+uv run python scripts/run_transformer_ablation.py --sample
+uv run python scripts/train_retriever.py --config configs/transformer_retrieval_stable.yaml --sample --model-type transformer
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split test --sample
 uv run python scripts/compare_retrievers.py --sample
 ```
+
+## Transformer Stabilization Status
+
+Latest sample comparison (stabilization attempt):
+
+- popularity val NDCG@10: `0.024347`
+- baseline val NDCG@10: `0.025047`
+- stable transformer val NDCG@10: `0.018203`
+
+Result: transformer remains below baseline and popularity on sample validation NDCG@10.
+
+Step 3 is not approved yet. CL-EPIDTN contrastive learning remains blocked until transformer baseline quality is recovered.
+
+Example MLflow run URLs from stabilization:
+
+- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/e9bf170a6e324b9ca7917d994cd939f5`
+- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/4940a9671a354a8fa27c8c9f4cf809fa`
+- best ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/745306f30a1145ef97e7f4bd716a0b68`
 
 ## Step 2 Validation Commands
 

@@ -87,6 +87,16 @@ The overfit smoke test checks whether loss clearly trends down over the first ~1
 It does not require strictly monotonic per-step decrease, because mini-batch optimization is noisy
 and short-term increases are normal. Diagnostic fields include both raw and smoothed trend signals.
 
+## Latest Sample Comparison Snapshot
+
+Current sample validation NDCG@10:
+
+- popularity: `0.024347`
+- baseline two-tower: `0.025047`
+- transformer retriever (stable): `0.018203`
+
+The plain baseline remains the approved quality gate for moving toward later research steps.
+
 ## Step 2 Validation Commands
 
 ### MLflow Tracking (SQLite)
