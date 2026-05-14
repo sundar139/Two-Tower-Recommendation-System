@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as torch_functional
 from torch import nn
@@ -22,6 +24,11 @@ def build_attention_bias(history_mask: torch.Tensor, dtype: torch.dtype) -> torc
     query_valid = history_mask.unsqueeze(-1)
     key_valid = history_mask.unsqueeze(1)
     allowed = query_valid & key_valid & causal
+
+    # Avoid all-masked attention rows for padded query positions.
+    padded_query = ~history_mask.unsqueeze(-1)
+    eye = torch.eye(seq_len, dtype=torch.bool, device=history_mask.device).unsqueeze(0)
+    allowed = allowed | (padded_query & eye)
 
     bias = torch.zeros((batch_size, seq_len, seq_len), dtype=dtype, device=history_mask.device)
     min_value = torch.finfo(dtype).min
@@ -76,20 +83,37 @@ class TransformerEncoderBlock(nn.Module):
         batch_size, _heads, seq_len, _head_dim = values.shape
         return values.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
 
-    def forward(self, hidden: torch.Tensor, history_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        history_mask: torch.Tensor,
+        *,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         attn_input = self.norm1(hidden)
         q = self._split_heads(self.q_proj(attn_input))
         k = self._split_heads(self.k_proj(attn_input))
         v = self._split_heads(self.v_proj(attn_input))
 
         attn_bias = build_attention_bias(history_mask, q.dtype)
-        attn_out = torch_functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_bias,
-            dropout_p=self.dropout.p if self.training else 0.0,
-        )
+        attn_probs: torch.Tensor | None = None
+        if return_attention:
+            scores = (q @ k.transpose(-2, -1)) / math.sqrt(float(self.head_dim))
+            scores = scores + attn_bias
+            attn_probs = torch.softmax(scores, dim=-1)
+            attn_probs = torch.nan_to_num(attn_probs, nan=0.0, posinf=0.0, neginf=0.0)
+            if self.training and self.dropout.p > 0.0:
+                attn_probs = torch_functional.dropout(attn_probs, p=self.dropout.p)
+            attn_out = attn_probs @ v
+        else:
+            attn_out = torch_functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_bias,
+                dropout_p=self.dropout.p if self.training else 0.0,
+            )
+
         attn_out = self._merge_heads(attn_out)
         hidden = hidden + self.dropout(self.out_proj(attn_out))
         hidden = hidden * history_mask.unsqueeze(-1)
@@ -97,6 +121,8 @@ class TransformerEncoderBlock(nn.Module):
         ffn_input = self.norm2(hidden)
         hidden = hidden + self.dropout(self.ffn(ffn_input))
         hidden = hidden * history_mask.unsqueeze(-1)
+        if return_attention and attn_probs is not None:
+            return hidden, attn_probs
         return hidden
 
 
@@ -143,7 +169,13 @@ class TransformerUserEncoder(nn.Module):
         pooled = torch.where(has_history.unsqueeze(-1), pooled, torch.zeros_like(pooled))
         return pooled
 
-    def forward(self, history_embeddings: torch.Tensor, history_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        history_embeddings: torch.Tensor,
+        history_mask: torch.Tensor,
+        *,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         batch_size, seq_len, _ = history_embeddings.shape
         if seq_len > self.history_length:
             msg = "history length exceeds configured positional embedding range"
@@ -155,7 +187,19 @@ class TransformerUserEncoder(nn.Module):
         hidden = self.input_dropout(hidden)
         hidden = hidden * history_mask.unsqueeze(-1)
 
+        attention_weights: list[torch.Tensor] = []
         for block in self.blocks:
-            hidden = block(hidden, history_mask)
+            if return_attention:
+                hidden, block_attention = block(
+                    hidden,
+                    history_mask,
+                    return_attention=True,
+                )
+                attention_weights.append(block_attention)
+            else:
+                hidden = block(hidden, history_mask)
 
-        return self._pool_sequence(hidden, history_mask)
+        pooled = self._pool_sequence(hidden, history_mask)
+        if return_attention:
+            return pooled, attention_weights
+        return pooled

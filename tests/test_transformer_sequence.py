@@ -73,3 +73,29 @@ def test_seq_len_one_supported() -> None:
     out = encoder(x, mask)
     assert out.shape == (4, 8)
     assert torch.isfinite(out).all()
+
+
+def test_all_padding_rows_do_not_create_non_finite_attention() -> None:
+    mask = torch.tensor([[False, False, False, False]], dtype=torch.bool)
+    bias = build_attention_bias(mask, dtype=torch.float32)
+    assert torch.isfinite(bias).all()
+
+
+def test_debug_attention_path_returns_weights() -> None:
+    encoder = TransformerUserEncoder(
+        embedding_dim=8,
+        history_length=4,
+        layers=1,
+        heads=2,
+        ffn_dim=16,
+        dropout=0.0,
+        sequence_pooling="mean",
+    )
+    x = torch.randn(2, 4, 8)
+    mask = torch.tensor([[True, True, False, False], [True, True, True, False]], dtype=torch.bool)
+
+    pooled, attn = encoder(x, mask, return_attention=True)
+    assert pooled.shape == (2, 8)
+    assert len(attn) == 1
+    assert attn[0].shape == (2, 2, 4, 4)
+    assert torch.isfinite(attn[0]).all()

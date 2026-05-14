@@ -103,3 +103,21 @@ def test_eval_mode_deterministic_with_same_input() -> None:
     out2 = model(batch)
     assert torch.allclose(out1["user_emb"], out2["user_emb"], atol=1e-6)
     assert torch.allclose(out1["logits"], out2["logits"], atol=1e-6)
+
+
+def test_encode_user_with_debug_outputs_attention_weights() -> None:
+    cfg = _config()
+    model = TransformerRetriever(
+        config=cfg,
+        num_users=32,
+        num_items_with_padding=64,
+        user_feature_dim=6,
+        item_feature_dim=7,
+    )
+    batch = _batch(4, cfg.train.history_length)
+
+    emb, debug = model.encode_user_with_debug(batch)
+    assert emb.shape == (4, cfg.model.embedding_dim)
+    attention = debug.get("attention_weights")
+    assert isinstance(attention, list)
+    assert len(attention) == cfg.model.transformer_layers

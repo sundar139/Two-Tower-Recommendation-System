@@ -67,14 +67,32 @@ class TransformerUserTower(nn.Module):
         history_item_idx: torch.Tensor,
         history_mask: torch.Tensor,
         user_features: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        return_debug: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, object]]:
         user_emb = self.user_embedding(user_idx)
         history_emb = self.history_embedding(history_item_idx)
-        sequence_vec = self.sequence_encoder(history_emb, history_mask)
+        debug: dict[str, object] = {}
+        if return_debug:
+            sequence_vec, attention_weights = self.sequence_encoder(
+                history_emb,
+                history_mask,
+                return_attention=True,
+            )
+            debug["attention_weights"] = attention_weights
+        else:
+            sequence_vec = self.sequence_encoder(history_emb, history_mask)
+
         user_feat_vec = self.user_features_mlp(user_features)
         merged = torch.cat([user_emb, sequence_vec, user_feat_vec], dim=1)
         projected = self.proj(merged)
-        return nn.functional.normalize(projected, p=2, dim=1)
+        normalized = nn.functional.normalize(projected, p=2, dim=1)
+        if return_debug:
+            debug["sequence_vec"] = sequence_vec
+            debug["user_emb"] = user_emb
+            debug["user_feat_vec"] = user_feat_vec
+            return normalized, debug
+        return normalized
 
 
 class TransformerRetriever(nn.Module):
@@ -123,6 +141,21 @@ class TransformerRetriever(nn.Module):
                 batch["history_item_idx"],
                 batch["history_mask"],
                 batch["user_features"],
+            ),
+        )
+
+    def encode_user_with_debug(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, object]]:
+        return cast(
+            tuple[torch.Tensor, dict[str, object]],
+            self.user_tower(
+                batch["user_idx"],
+                batch["history_item_idx"],
+                batch["history_mask"],
+                batch["user_features"],
+                return_debug=True,
             ),
         )
 
