@@ -19,8 +19,8 @@ model:
   item_id_embedding_dim: 64
   feature_hidden_dim: 128
   projection_hidden_dim: 256
-  dropout: 0.1
-  temperature: 0.07
+  dropout: 0.0
+  temperature: 0.1
 
 train:
   random_seed: 42
@@ -29,15 +29,13 @@ train:
   eval_batch_size: 512
   num_workers: 0
   history_length: 50
-  learning_rate: 0.001
+  learning_rate: 0.0005
   weight_decay: 0.000001
-  epochs: 10
+  epochs: 12
   amp_enabled: true
   max_grad_norm: 1.0
   scheduler: cosine
-  scheduler_t_max: 10
-  scheduler_patience: 2
-  scheduler_factor: 0.5
+  scheduler_t_max: 12
   min_learning_rate: 0.00001
 
 mlflow_tracking_uri: file:./mlruns

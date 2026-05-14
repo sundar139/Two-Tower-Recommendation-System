@@ -83,6 +83,11 @@ class TrainConfig(BaseModel):
     epochs: int = 3
     amp_enabled: bool = True
     max_grad_norm: float = 1.0
+    scheduler: Literal["none", "cosine", "plateau"] = "none"
+    scheduler_t_max: int = 10
+    scheduler_patience: int = 2
+    scheduler_factor: float = 0.5
+    min_learning_rate: float = 1e-6
 
 
 class RetrievalConfig(BaseModel):
@@ -177,6 +182,11 @@ def load_retrieval_config(
             epochs=train.get("epochs", env.EPOCHS),
             amp_enabled=train.get("amp_enabled", env.AMP_ENABLED),
             max_grad_norm=train.get("max_grad_norm", 1.0),
+            scheduler=train.get("scheduler", "none"),
+            scheduler_t_max=train.get("scheduler_t_max", 10),
+            scheduler_patience=train.get("scheduler_patience", 2),
+            scheduler_factor=train.get("scheduler_factor", 0.5),
+            min_learning_rate=train.get("min_learning_rate", 1e-6),
         ),
         mlflow_tracking_uri=raw.get("mlflow_tracking_uri", env.MLFLOW_TRACKING_URI),
         mlflow_experiment_name=raw.get("mlflow_experiment_name", env.MLFLOW_EXPERIMENT_NAME),

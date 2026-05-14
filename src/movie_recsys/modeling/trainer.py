@@ -39,6 +39,31 @@ class TrainingResult:
     final_train_loss: float
 
 
+def _build_scheduler(
+    config: RetrievalConfig,
+    optimizer: torch.optim.Optimizer,
+) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+    name = config.train.scheduler
+    if name == "none":
+        return None
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(config.train.scheduler_t_max, 1),
+            eta_min=config.train.min_learning_rate,
+        )
+    if name == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=config.train.scheduler_factor,
+            patience=config.train.scheduler_patience,
+            min_lr=config.train.min_learning_rate,
+        )
+    msg = f"Unsupported scheduler: {name}"
+    raise ValueError(msg)
+
+
 def _select_device(device_name: str) -> torch.device:
     if device_name == "cuda":
         return torch.device("cuda")
@@ -117,6 +142,7 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
         lr=config.train.learning_rate,
         weight_decay=config.train.weight_decay,
     )
+    scheduler = _build_scheduler(config, optimizer)
 
     amp_enabled = bool(config.train.amp_enabled and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
@@ -144,6 +170,10 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
                 with torch.autocast(device_type=device.type, enabled=amp_enabled):
                     output = model(batch)
                     loss = criterion(output["logits"])
+
+                if not torch.isfinite(loss):
+                    continue
+
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
@@ -164,6 +194,13 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
             )
             val_metrics = {f"val_{k}": v for k, v in eval_result.metrics.items()}
             log_metrics(val_metrics, step=epoch)
+            log_metrics({"learning_rate": optimizer.param_groups[0]["lr"]}, step=epoch)
+
+            if scheduler is not None:
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(eval_result.metrics["ndcg@10"])
+                else:
+                    scheduler.step()
 
             if eval_result.metrics["ndcg@10"] > best_ndcg:
                 best_ndcg = eval_result.metrics["ndcg@10"]
@@ -183,6 +220,7 @@ def train_retriever(config: RetrievalConfig, *, sample: bool) -> TrainingResult:
             "popularity_val_metrics": popularity_result.metrics,
             "sample": sample,
             "device": str(device),
+            "scheduler": config.train.scheduler,
         }
         report_path = config.paths.report_output_dir / "train_report.json"
         save_json(report_path, report_payload)
