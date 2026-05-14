@@ -84,14 +84,13 @@ def main(
         history_mask[0, -len(history) :] = True
 
     with torch.no_grad():
+        user_features = np.asarray(tables.user_features[first_user], dtype=np.float32)
         user_emb = (
             model.user_tower(
                 torch.tensor([first_user], dtype=torch.long, device=device),
                 history_tensor,
                 history_mask,
-                torch.tensor(
-                    [tables.user_features[first_user]], dtype=torch.float32, device=device
-                ),
+                torch.from_numpy(user_features).unsqueeze(0).to(device),
             )
             .cpu()
             .numpy()
