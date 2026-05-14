@@ -134,9 +134,9 @@ def main(
 	stats = {
 		"raw_ratings_count": raw_ratings_count,
 		"positive_interactions_count": positives.height,
-		"users_before_filtering": positives.select("userId").unique().height,
+		"users_before_filtering": ratings.select("userId").unique().height,
 		"users_after_filtering": filtered_positives.select("userId").unique().height,
-		"movies_before_filtering": positives.select("movieId").unique().height,
+		"movies_before_filtering": movies.select("movieId").unique().height,
 		"movies_after_filtering": filtered_positives.select("movieId").unique().height,
 		"train_count": train.height,
 		"val_count": val.height,
