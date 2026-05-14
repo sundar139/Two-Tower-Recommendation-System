@@ -83,7 +83,7 @@ def _to_markdown(payload: dict[str, dict[str, dict[str, float]]]) -> str:
 
 @app.command()
 def main(
-    config: Path = typer.Option(Path("configs/transformer_retrieval.yaml"), "--config"),
+    config: Path = typer.Option(Path("configs/transformer_retrieval_stable.yaml"), "--config"),
     sample: bool = typer.Option(False, "--sample"),
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
