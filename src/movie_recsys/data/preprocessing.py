@@ -50,6 +50,11 @@ def build_positive_interactions(ratings: pl.DataFrame, threshold: float) -> pl.D
 		)
 		.filter(pl.col("is_positive"))
 		.sort(["userId", "timestamp", "movieId"])
+		.with_columns(pl.int_range(0, pl.len()).over("userId").alias("_event_seq"))
+		.with_columns(
+			(pl.col("timestamp").cast(pl.Int64) * 1000 + pl.col("_event_seq")).alias("timestamp")
+		)
+		.drop("_event_seq")
 	)
 
 

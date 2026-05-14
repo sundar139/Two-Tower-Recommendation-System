@@ -92,7 +92,8 @@ def _check_ollama() -> CheckResult:
 		return CheckResult(
 			"ollama",
 			"WARN",
-			f"offline or unreachable: {exc}\nWhen online, ensure models are installed:\n{pull_lines}",
+			"offline or unreachable: "
+			f"{exc}\nWhen online, ensure models are installed:\n{pull_lines}",
 			False,
 		)
 
