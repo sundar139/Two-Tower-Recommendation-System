@@ -18,8 +18,12 @@ class EnvConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     MOVIELENS_DATA_DIR: str = "data/processed"
-    MLFLOW_TRACKING_URI: str = "file:./mlruns"
+    MLFLOW_TRACKING_URI: str = "sqlite:///mlflow.db"
+    MLFLOW_ARTIFACT_ROOT: str = "./mlruns"
     MLFLOW_EXPERIMENT_NAME: str = "movielens-two-tower"
+    MLFLOW_UI_HOST: str = "127.0.0.1"
+    MLFLOW_UI_PORT: int = 5000
+    MLFLOW_UI_URL: str = "http://127.0.0.1:5000"
     MODEL_OUTPUT_DIR: str = "artifacts/models"
     INDEX_OUTPUT_DIR: str = "artifacts/faiss"
     REPORT_OUTPUT_DIR: str = "artifacts/reports"
@@ -60,6 +64,7 @@ class DataFilesConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    model_type: Literal["baseline", "transformer"] = "baseline"
     embedding_dim: int = 128
     user_id_embedding_dim: int = 64
     item_id_embedding_dim: int = 64
@@ -67,6 +72,10 @@ class ModelConfig(BaseModel):
     projection_hidden_dim: int = 256
     dropout: float = 0.1
     temperature: float = 0.07
+    transformer_layers: int = 2
+    transformer_heads: int = 4
+    transformer_ffn_dim: int = 512
+    sequence_pooling: Literal["last", "mean"] = "last"
 
 
 class TrainConfig(BaseModel):
@@ -98,7 +107,11 @@ class RetrievalConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     train: TrainConfig = Field(default_factory=TrainConfig)
     mlflow_tracking_uri: str
+    mlflow_artifact_root: str
     mlflow_experiment_name: str
+    mlflow_ui_host: str
+    mlflow_ui_port: int
+    mlflow_ui_url: str
 
     @property
     def train_path(self) -> Path:
@@ -162,6 +175,7 @@ def load_retrieval_config(
         ),
         files=DataFilesConfig.model_validate(raw.get("files", {})),
         model=ModelConfig(
+            model_type=model.get("model_type", "baseline"),
             embedding_dim=model.get("embedding_dim", env.RETRIEVAL_EMBEDDING_DIM),
             user_id_embedding_dim=model.get("user_id_embedding_dim", 64),
             item_id_embedding_dim=model.get("item_id_embedding_dim", 64),
@@ -169,6 +183,10 @@ def load_retrieval_config(
             projection_hidden_dim=model.get("projection_hidden_dim", 256),
             dropout=model.get("dropout", 0.1),
             temperature=model.get("temperature", 0.07),
+            transformer_layers=model.get("transformer_layers", 2),
+            transformer_heads=model.get("transformer_heads", 4),
+            transformer_ffn_dim=model.get("transformer_ffn_dim", 512),
+            sequence_pooling=model.get("sequence_pooling", "last"),
         ),
         train=TrainConfig(
             random_seed=train.get("random_seed", env.RANDOM_SEED),
@@ -189,7 +207,11 @@ def load_retrieval_config(
             min_learning_rate=train.get("min_learning_rate", 1e-6),
         ),
         mlflow_tracking_uri=raw.get("mlflow_tracking_uri", env.MLFLOW_TRACKING_URI),
+        mlflow_artifact_root=raw.get("mlflow_artifact_root", env.MLFLOW_ARTIFACT_ROOT),
         mlflow_experiment_name=raw.get("mlflow_experiment_name", env.MLFLOW_EXPERIMENT_NAME),
+        mlflow_ui_host=raw.get("mlflow_ui_host", env.MLFLOW_UI_HOST),
+        mlflow_ui_port=raw.get("mlflow_ui_port", env.MLFLOW_UI_PORT),
+        mlflow_ui_url=raw.get("mlflow_ui_url", env.MLFLOW_UI_URL),
     )
 
     config.paths.model_output_dir.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ data/processed/*
 !data/processed/.gitkeep
 
 mlruns/
+mlflow.db
 outputs/
 artifacts/
 models/

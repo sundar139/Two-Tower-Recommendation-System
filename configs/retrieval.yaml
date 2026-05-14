@@ -14,6 +14,7 @@ files:
   item_id_map: item_id_map.parquet
 
 model:
+  model_type: baseline
   embedding_dim: 128
   user_id_embedding_dim: 64
   item_id_embedding_dim: 64
@@ -21,6 +22,10 @@ model:
   projection_hidden_dim: 256
   dropout: 0.1
   temperature: 0.07
+  transformer_layers: 2
+  transformer_heads: 4
+  transformer_ffn_dim: 512
+  sequence_pooling: last
 
 train:
   random_seed: 42
@@ -40,5 +45,9 @@ train:
   scheduler_factor: 0.5
   min_learning_rate: 0.00001
 
-mlflow_tracking_uri: file:./mlruns
+mlflow_tracking_uri: sqlite:///mlflow.db
+mlflow_artifact_root: ./mlruns
 mlflow_experiment_name: movielens-two-tower
+mlflow_ui_host: 127.0.0.1
+mlflow_ui_port: 5000
+mlflow_ui_url: http://127.0.0.1:5000
