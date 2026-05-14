@@ -1,0 +1,19 @@
+raw_data_dir: data/raw
+interim_data_dir: data/interim
+processed_data_dir: data/processed
+movielens_url: https://files.grouplens.org/datasets/movielens/ml-25m.zip
+expected_zip_name: ml-25m.zip
+expected_checksum: null
+positive_rating_threshold: 4.0
+min_positive_interactions_per_user: 3
+sample_users: null
+output_files:
+  interactions_train: interactions_train.parquet
+  interactions_val: interactions_val.parquet
+  interactions_test: interactions_test.parquet
+  users: users.parquet
+  items: items.parquet
+  user_id_map: user_id_map.parquet
+  item_id_map: item_id_map.parquet
+  user_histories: user_histories.parquet
+  dataset_stats: dataset_stats.json
