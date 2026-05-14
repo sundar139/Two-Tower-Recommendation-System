@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import mlflow
 import polars as pl
@@ -47,6 +49,22 @@ def _format_metrics_table(
     return "\n".join(rows)
 
 
+def _update_summary_report(
+    summary_path: Path,
+    *,
+    split: str,
+    payload: dict[str, Any],
+) -> None:
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    if summary_path.exists():
+        existing = summary_path.read_text(encoding="utf-8")
+        summary = {} if not existing else dict(json.loads(existing))
+    else:
+        summary = {}
+    summary[split] = payload
+    save_json(summary_path, summary)
+
+
 @app.command()
 def main(
     config: Path = typer.Option(Path("configs/retrieval.yaml"), "--config"),
@@ -78,6 +96,12 @@ def main(
             }
             report_path = cfg.paths.report_output_dir / f"popularity_{split}.json"
             save_json(report_path, report)
+            _update_summary_report(
+                cfg.paths.report_output_dir
+                / f"popularity_{'sample' if sample else 'full'}_summary.json",
+                split=split,
+                payload=report,
+            )
             log_metrics({f"{split}_{k}": v for k, v in metrics.items()})
             log_artifacts([report_path])
             typer.echo(report)
@@ -126,6 +150,12 @@ def main(
         table_md = cfg.paths.report_output_dir / f"two_tower_{split}.md"
         metrics_table = _format_metrics_table(popularity.metrics, eval_result.metrics, delta)
         save_json(report_json, report)
+        _update_summary_report(
+            cfg.paths.report_output_dir
+            / f"two_tower_{'sample' if sample else 'full'}_summary.json",
+            split=split,
+            payload=report,
+        )
         save_markdown(
             table_md,
             metrics_table
