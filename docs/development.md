@@ -49,3 +49,25 @@ ollama pull qwen3-embedding:0.6b
 - Commit after each successful implementation part.
 - Keep commit scope narrow and message explicit.
 - Never commit raw datasets, processed datasets, MLflow runs, artifacts, model checkpoints, or cache folders.
+
+## MLflow Local Workflow
+
+- Tracking backend uses SQLite: `sqlite:///mlflow.db`
+- Artifacts are local under `./mlruns`
+- Both `mlflow.db` and `mlruns/` are ignored by git
+
+Start the UI:
+
+```powershell
+uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
+```
+
+or:
+
+```powershell
+uv run python scripts/start_mlflow_ui.py
+```
+
+Open:
+
+`http://127.0.0.1:5000`
