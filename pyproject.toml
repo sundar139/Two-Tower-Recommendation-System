@@ -91,3 +91,7 @@ show_error_codes = true
 [[tool.mypy.overrides]]
 module = ["yaml", "tqdm"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["faiss"]
+ignore_missing_imports = true

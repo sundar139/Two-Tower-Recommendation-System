@@ -1,0 +1,39 @@
+paths:
+  processed_data_dir: data/processed
+  model_output_dir: artifacts/models
+  index_output_dir: artifacts/faiss
+  report_output_dir: artifacts/reports
+
+files:
+  interactions_train: interactions_train.parquet
+  interactions_val: interactions_val.parquet
+  interactions_test: interactions_test.parquet
+  users: users.parquet
+  items: items.parquet
+  user_id_map: user_id_map.parquet
+  item_id_map: item_id_map.parquet
+
+model:
+  embedding_dim: 128
+  user_id_embedding_dim: 64
+  item_id_embedding_dim: 64
+  feature_hidden_dim: 128
+  projection_hidden_dim: 256
+  dropout: 0.1
+  temperature: 0.07
+
+train:
+  random_seed: 42
+  device: auto
+  train_batch_size: 256
+  eval_batch_size: 512
+  num_workers: 0
+  history_length: 50
+  learning_rate: 0.001
+  weight_decay: 0.000001
+  epochs: 3
+  amp_enabled: true
+  max_grad_norm: 1.0
+
+mlflow_tracking_uri: file:./mlruns
+mlflow_experiment_name: movielens-two-tower
