@@ -1,5 +1,5 @@
 [project]
-name = "cl-epidtn-movielens"
+name = "movielens-two-tower-recommender"
 version = "0.1.0"
 description = "CL-enhanced transformer two-tower recommendation system for MovieLens-25M"
 readme = "README.md"

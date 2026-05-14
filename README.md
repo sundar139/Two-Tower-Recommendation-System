@@ -1,4 +1,4 @@
-# CL-EPIDTN MovieLens Recommendation System
+# MovieLens Two-Tower Recommender
 
 Production-grade repository for a CL-enhanced transformer two-tower recommendation system on MovieLens-25M.
 
