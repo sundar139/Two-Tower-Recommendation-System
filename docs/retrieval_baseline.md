@@ -89,6 +89,30 @@ and short-term increases are normal. Diagnostic fields include both raw and smoo
 
 ## Step 2 Validation Commands
 
+### MLflow Tracking (SQLite)
+
+- Tracking metadata URI: `sqlite:///mlflow.db`
+- Artifact root: `./mlruns`
+- UI URL: `http://127.0.0.1:5000`
+
+Start UI with either command:
+
+```powershell
+uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
+```
+
+```powershell
+uv run python scripts/start_mlflow_ui.py
+```
+
+All train/evaluate/export scripts print:
+
+- `mlflow_tracking_uri`
+- `mlflow_experiment_name`
+- `mlflow_run_id`
+- `mlflow_ui_url`
+- `mlflow_run_url`
+
 ### Sample Validation Commands
 
 ```powershell

@@ -1,6 +1,6 @@
 # MovieLens Two-Tower Recommender
 
-Production-grade repository for a CL-enhanced transformer two-tower recommendation system on MovieLens-25M.
+Production-grade repository for baseline and transformer two-tower retrieval on MovieLens-25M.
 
 ## Current Scope
 
@@ -20,14 +20,20 @@ Implemented in Step 2 (plain retrieval baseline):
 - Retrieval Dataset/DataLoader with leakage-safe history windows
 - Offline metrics: HR@10, MRR@10, NDCG@10, Recall@50
 - FAISS flat inner-product index export/reload/search
-- MLflow logging for training and evaluation runs
+- MLflow logging for training, evaluation, and FAISS export runs
+
+Implemented in Step 3 (transformer retrieval encoder):
+
+- Custom transformer user sequence encoder with causal self-attention
+- Padding-aware and causal masking to prevent leakage
+- Configurable sequence pooling (`last` or `mean`)
+- TransformerRetriever integrated into train/eval/export workflow
 
 Not yet implemented in this step:
 
 - Contrastive learning objective
 - FastAPI serving layer
 - Ollama explanation endpoints
-- Custom transformer sequence encoder
 - Neural ranker
 
 ## Dataset Note
@@ -69,13 +75,53 @@ uv run python verify.py
 uv run python scripts/verify_environment.py
 ```
 
+## MLflow UI (SQLite Backend)
+
+Metadata backend: `sqlite:///mlflow.db`
+
+Artifacts: local `./mlruns` (ignored by git)
+
+Start UI directly:
+
+```powershell
+uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
+```
+
+Or via project helper:
+
+```powershell
+uv run python scripts/start_mlflow_ui.py
+```
+
+UI URL:
+
+`http://127.0.0.1:5000`
+
+Training/evaluation/export scripts print:
+
+- `mlflow_tracking_uri`
+- `mlflow_experiment_name`
+- `mlflow_run_id`
+- `mlflow_ui_url`
+- `mlflow_run_url`
+
 ## Step 2 Retrieval Commands
 
 ```powershell
 uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample --model-type baseline
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val --sample
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample --model-type baseline
+```
+
+## Step 3 Transformer Commands
+
+```powershell
+uv run python scripts/train_retriever.py --config configs/transformer_retrieval.yaml --sample --model-type transformer
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval.yaml --model transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval.yaml --model transformer --split test --sample
+uv run python scripts/export_faiss_index.py --config configs/transformer_retrieval.yaml --sample --model-type transformer
+uv run python scripts/compare_retrievers.py --sample
 ```
 
 ## Step 2 Validation Commands
@@ -89,13 +135,13 @@ uv run ruff check .
 uv run mypy src
 uv run pytest -q
 uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val --sample
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val --sample
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample --model-type baseline
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val --sample
 uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test --sample
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split test --sample
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split test --sample
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample --model-type baseline
 git status --short
-git ls-files data artifacts mlruns models .venv
+git ls-files data artifacts mlruns models .venv mlflow.db
 ```
 
 ### Full-Data Validation Commands
@@ -108,12 +154,12 @@ uv run mypy src
 uv run pytest -q
 uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
 uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split test
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml --model-type baseline
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split test
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --model-type baseline
 git status --short
-git ls-files data artifacts mlruns models .venv
+git ls-files data artifacts mlruns models .venv mlflow.db
 ```
 
 ## Run Quality Checks
@@ -156,8 +202,12 @@ Do not commit generated data or experiment artifacts:
 - `data/processed/**` generated outputs
 - `artifacts/**`
 - `mlruns/**`
+- `mlflow.db`
 - model checkpoints and FAISS index files
 
-## Next Planned Step
+Transformer limitations currently in scope:
 
-Extend the plain baseline with transformer-based sequence encoding and contrastive learning.
+- no contrastive learning yet
+- no neural ranker yet
+- no FastAPI endpoints yet
+- no Ollama explanation endpoints yet
