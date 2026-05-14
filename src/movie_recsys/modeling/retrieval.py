@@ -1,4 +1,4 @@
-"""Two-tower retriever module."""
+"""Baseline two-tower retriever module."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from movie_recsys.modeling.towers import ItemTower, UserTower
 from movie_recsys.training.config import RetrievalConfig
 
 
-class TwoTowerRetriever(nn.Module):
+class BaselineRetriever(nn.Module):
     def __init__(
         self,
         *,
@@ -63,3 +63,7 @@ class TwoTowerRetriever(nn.Module):
         item_emb = self.encode_item(batch)
         logits = (user_emb @ item_emb.T) / self.temperature
         return {"user_emb": user_emb, "item_emb": item_emb, "logits": logits}
+
+
+# Backward compatibility alias.
+TwoTowerRetriever = BaselineRetriever
