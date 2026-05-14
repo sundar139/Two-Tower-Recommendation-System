@@ -33,6 +33,16 @@ If wheel resolution fails in a specific environment, update the uv index configu
 
 - `scripts/verify_environment.py` performs an optional health check at `http://localhost:11434/api/tags`.
 - Ollama offline status is reported as `WARN`, not a hard failure.
+- Required local models for this project:
+	- `qwen3:4b`
+	- `qwen3-embedding:0.6b`
+
+Install commands:
+
+```powershell
+ollama pull qwen3:4b
+ollama pull qwen3-embedding:0.6b
+```
 
 ## Commit Workflow
 

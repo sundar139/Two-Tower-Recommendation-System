@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 import httpx
 import orjson
 
+REQUIRED_OLLAMA_MODELS = ["qwen3:4b", "qwen3-embedding:0.6b"]
+
 
 @dataclass(slots=True)
 class CheckResult:
@@ -60,10 +62,39 @@ def _check_ollama() -> CheckResult:
 	try:
 		resp = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
 		if resp.status_code == 200:
-			return CheckResult("ollama", "PASS", "reachable at localhost:11434", False)
+			payload = resp.json()
+			models = payload.get("models", []) if isinstance(payload, dict) else []
+			available = {
+				str(model.get("name", "")).strip()
+				for model in models
+				if isinstance(model, dict)
+			}
+			missing = [name for name in REQUIRED_OLLAMA_MODELS if name not in available]
+			if not missing:
+				return CheckResult(
+					"ollama",
+					"PASS",
+					"reachable and required models installed",
+					False,
+				)
+
+			pull_lines = "\n".join([f"ollama pull {name}" for name in missing])
+			return CheckResult(
+				"ollama",
+				"WARN",
+				"reachable but missing required models: "
+				f"{', '.join(missing)}\nInstall with:\n{pull_lines}",
+				False,
+			)
 		return CheckResult("ollama", "WARN", f"unexpected status: {resp.status_code}", False)
 	except Exception as exc:  # noqa: BLE001
-		return CheckResult("ollama", "WARN", f"offline or unreachable: {exc}", False)
+		pull_lines = "\n".join([f"ollama pull {name}" for name in REQUIRED_OLLAMA_MODELS])
+		return CheckResult(
+			"ollama",
+			"WARN",
+			f"offline or unreachable: {exc}\nWhen online, ensure models are installed:\n{pull_lines}",
+			False,
+		)
 
 
 def collect_results(include_ollama: bool = True) -> list[CheckResult]:
