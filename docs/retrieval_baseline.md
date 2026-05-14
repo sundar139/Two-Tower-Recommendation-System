@@ -80,3 +80,9 @@ Not included in this baseline:
 - CL-EPIDTN contrastive learning objective
 - neural reranker
 - online serving APIs
+
+## Overfit Diagnostic Note
+
+The overfit smoke test checks whether loss clearly trends down over the first ~100 updates.
+It does not require strictly monotonic per-step decrease, because mini-batch optimization is noisy
+and short-term increases are normal. Diagnostic fields include both raw and smoothed trend signals.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 import typer
 from torch.utils.data import DataLoader, Subset
@@ -73,6 +74,8 @@ def main(
             optimizer.zero_grad(set_to_none=True)
             output = model(batch)
             loss = criterion(output["logits"])
+            if not torch.isfinite(loss):
+                continue
             loss.backward()
             optimizer.step()
             losses.append(float(loss.item()))
@@ -80,11 +83,35 @@ def main(
 
     initial_loss = losses[0] if losses else float("nan")
     final_loss = losses[-1] if losses else float("nan")
+    best_loss = min(losses) if losses else float("nan")
+    non_decreasing_steps = sum(1 for i in range(1, len(losses)) if losses[i] >= losses[i - 1])
+    percent_loss_reduction = (
+        ((initial_loss - final_loss) / initial_loss) * 100.0
+        if losses and np.isfinite(initial_loss) and initial_loss > 0
+        else float("nan")
+    )
+
+    rolling_window = min(10, len(losses))
+    if rolling_window > 1:
+        rolled = np.convolve(
+            np.array(losses, dtype=np.float64),
+            np.ones(rolling_window),
+            mode="valid",
+        )
+        rolled = rolled / rolling_window
+        smoothed_loss_decreased = bool(rolled[-1] < rolled[0])
+    else:
+        smoothed_loss_decreased = bool(final_loss < initial_loss)
+
     payload = {
         "steps": len(losses),
         "initial_loss": initial_loss,
         "final_loss": final_loss,
+        "best_loss": best_loss,
         "loss_decreased": bool(final_loss < initial_loss),
+        "percent_loss_reduction": percent_loss_reduction,
+        "number_of_non_decreasing_steps": non_decreasing_steps,
+        "smoothed_loss_decreased": smoothed_loss_decreased,
     }
     typer.echo(payload)
 
