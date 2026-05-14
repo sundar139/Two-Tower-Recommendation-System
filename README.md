@@ -78,6 +78,44 @@ uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --mo
 uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml
 ```
 
+## Step 2 Validation Commands
+
+### Sample Validation Commands
+
+```powershell
+Copy-Item env.example .env -Force
+uv run python verify.py
+uv run ruff check .
+uv run mypy src
+uv run pytest -q
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val --sample
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test --sample
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split test --sample
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample
+git status --short
+git ls-files data artifacts mlruns models .venv
+```
+
+### Full-Data Validation Commands
+
+```powershell
+Copy-Item env.example .env -Force
+uv run python verify.py
+uv run ruff check .
+uv run mypy src
+uv run pytest -q
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test
+uv run python scripts/train_retriever.py --config configs/retrieval.yaml
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split val
+uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model two_tower --split test
+uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml
+git status --short
+git ls-files data artifacts mlruns models .venv
+```
+
 ## Run Quality Checks
 
 ```powershell
