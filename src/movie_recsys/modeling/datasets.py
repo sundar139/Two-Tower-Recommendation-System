@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -35,13 +35,21 @@ def load_feature_tables(config: RetrievalConfig) -> FeatureTables:
     users = pl.read_parquet(config.users_path)
     items = pl.read_parquet(config.items_path)
 
+    # Preserve year signal for item MLP while keeping magnitude stable.
+    if "release_year" in items.columns:
+        items = items.with_columns(
+            ((pl.col("release_year") - 1900) / 200.0)
+            .cast(pl.Float32)
+            .alias("release_year_norm")
+        )
+
     user_feature_cols = _select_numeric_feature_columns(
         users,
         exclude={"user_idx", "original_userId", "first_timestamp", "last_timestamp"},
     )
     item_feature_cols = _select_numeric_feature_columns(
         items,
-        exclude={"item_idx", "original_movieId", "release_year"},
+        exclude={"item_idx", "original_movieId"},
     )
 
     users_sorted = users.sort("user_idx")
@@ -49,6 +57,18 @@ def load_feature_tables(config: RetrievalConfig) -> FeatureTables:
 
     user_features = users_sorted.select(user_feature_cols).to_numpy().astype(np.float32, copy=False)
     item_features = items_sorted.select(item_feature_cols).to_numpy().astype(np.float32, copy=False)
+
+    def _standardize(values: np.ndarray) -> np.ndarray:
+        clean = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+        mean = clean.mean(axis=0, keepdims=True)
+        std = clean.std(axis=0, keepdims=True)
+        std = np.where(std < 1e-6, 1.0, std)
+        standardized = (clean - mean) / std
+        standardized = np.nan_to_num(standardized, nan=0.0, posinf=0.0, neginf=0.0)
+        return cast(np.ndarray, standardized)
+
+    user_features = _standardize(user_features).astype(np.float32, copy=False)
+    item_features = _standardize(item_features).astype(np.float32, copy=False)
 
     return FeatureTables(
         user_features=user_features,

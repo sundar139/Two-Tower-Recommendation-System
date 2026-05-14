@@ -31,7 +31,8 @@ def evaluate_popularity(
     predictions: dict[int, list[int]] = {}
     for user_idx in targets:
         seen = seen_by_user.get(user_idx, set())
-        filtered = [item for item in ranked_all if item not in seen][:200]
+        gt_items = targets.get(user_idx, set())
+        filtered = [item for item in ranked_all if item not in seen or item in gt_items][:200]
         predictions[user_idx] = filtered
 
     metrics = aggregate_ranking_metrics(predictions, targets)

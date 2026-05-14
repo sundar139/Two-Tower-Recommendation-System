@@ -50,6 +50,7 @@ def _write_small_tables(tmp_path: Path) -> Path:
         {
             "item_idx": [0, 1, 2, 3, 4],
             "original_movieId": [100, 101, 102, 103, 104],
+            "release_year": [1999, 2000, 2001, 2002, 2003],
             "positive_count": [1, 2, 3, 4, 5],
             "popularity_score": [0.1, 0.2, 0.3, 0.4, 0.5],
             "rating_count": [1, 1, 1, 1, 1],
@@ -108,3 +109,21 @@ def test_history_excludes_target_item(tmp_path: Path) -> None:
     target = row["item_idx"] - 1
     history_original = [v - 1 for v in row["history_item_idx"].tolist()]
     assert target not in history_original
+
+
+def test_item_release_year_feature_is_included(tmp_path: Path) -> None:
+    cfg_path = _write_small_tables(tmp_path)
+    cfg = load_retrieval_config(cfg_path)
+    tables = load_feature_tables(cfg)
+    assert "release_year_norm" in tables.item_feature_columns
+
+
+def test_feature_tables_are_standardized_and_finite(tmp_path: Path) -> None:
+    cfg_path = _write_small_tables(tmp_path)
+    cfg = load_retrieval_config(cfg_path)
+    tables = load_feature_tables(cfg)
+
+    assert torch.isfinite(torch.tensor(tables.user_features)).all()
+    assert torch.isfinite(torch.tensor(tables.item_features)).all()
+    assert abs(float(tables.user_features.mean())) < 1e-4
+    assert abs(float(tables.item_features.mean())) < 1e-4

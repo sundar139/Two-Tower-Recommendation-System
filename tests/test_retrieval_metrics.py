@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import polars as pl
+
 from movie_recsys.modeling.metrics import (
     aggregate_ranking_metrics,
     hit_rate_at_k,
@@ -7,6 +9,7 @@ from movie_recsys.modeling.metrics import (
     ndcg_at_k,
     recall_at_k,
 )
+from movie_recsys.modeling.popularity import evaluate_popularity
 
 
 def test_basic_metrics_behavior() -> None:
@@ -30,3 +33,17 @@ def test_aggregate_metrics() -> None:
     targets = {0: {2}, 1: {7}}
     metrics = aggregate_ranking_metrics(predictions, targets)
     assert set(metrics.keys()) == {"hr@10", "mrr@10", "ndcg@10", "recall@50"}
+
+
+def test_seen_filter_keeps_ground_truth_target() -> None:
+    train = pl.DataFrame({"user_idx": [0], "item_idx": [2]})
+    split = pl.DataFrame({"user_idx": [0], "item_idx": [2]})
+    items = pl.DataFrame(
+        {
+            "item_idx": [2, 1, 0],
+            "positive_count": [10, 3, 1],
+            "popularity_score": [1.0, 0.2, 0.1],
+        }
+    )
+    _metrics, predictions = evaluate_popularity(train, split, items)
+    assert 2 in predictions[0]

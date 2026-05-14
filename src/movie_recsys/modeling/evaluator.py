@@ -59,13 +59,13 @@ def _build_user_tensor_inputs(
         hist_tensor[0, -len(history) :] = torch.tensor(history, dtype=torch.long)
         mask_tensor[0, -len(history) :] = True
 
+    user_features = np.asarray(feature_tables.user_features[user_idx], dtype=np.float32)
+
     return {
         "user_idx": torch.tensor([user_idx], dtype=torch.long),
         "history_item_idx": hist_tensor,
         "history_mask": mask_tensor,
-        "user_features": torch.tensor(
-            [feature_tables.user_features[user_idx]], dtype=torch.float32
-        ),
+        "user_features": torch.from_numpy(user_features).unsqueeze(0),
     }
 
 
@@ -118,7 +118,12 @@ def evaluate_two_tower(
         retrieved, _scores, latency = search_index(index, user_emb.cpu().numpy(), mapping, top_k)
         total_latency += latency
         seen_items = seen.get(user_idx, set())
-        filtered = [int(item) for item in retrieved[0].tolist() if int(item) not in seen_items]
+        gt_items = targets.get(user_idx, set())
+        filtered = [
+            int(item)
+            for item in retrieved[0].tolist()
+            if int(item) not in seen_items or int(item) in gt_items
+        ]
         predictions[user_idx] = filtered
 
     metrics = aggregate_ranking_metrics(predictions, targets)
