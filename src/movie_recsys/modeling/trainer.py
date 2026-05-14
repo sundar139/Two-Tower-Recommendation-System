@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -53,24 +54,53 @@ class TrainingResult:
 def _build_scheduler(
     config: RetrievalConfig,
     optimizer: torch.optim.Optimizer,
-) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+    *,
+    steps_per_epoch: int,
+) -> tuple[
+    torch.optim.lr_scheduler.LRScheduler
+    | torch.optim.lr_scheduler.ReduceLROnPlateau
+    | None,
+    bool,
+]:
     name = config.train.scheduler
     if name == "none":
-        return None
+        return None, False
     if name == "cosine":
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=max(config.train.scheduler_t_max, 1),
-            eta_min=config.train.min_learning_rate,
+        return (
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(config.train.scheduler_t_max, 1),
+                eta_min=config.train.min_learning_rate,
+            ),
+            False,
         )
     if name == "plateau":
-        return torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="max",
-            factor=config.train.scheduler_factor,
-            patience=config.train.scheduler_patience,
-            min_lr=config.train.min_learning_rate,
+        return (
+            torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="max",
+                factor=config.train.scheduler_factor,
+                patience=config.train.scheduler_patience,
+                min_lr=config.train.min_learning_rate,
+            ),
+            False,
         )
+    if name == "warmup_cosine":
+        total_steps = max(steps_per_epoch * max(config.train.epochs, 1), 1)
+        warmup_steps = min(max(config.train.warmup_steps, 0), total_steps)
+        base_lr = max(config.train.learning_rate, 1e-12)
+        min_factor = min(config.train.min_learning_rate / base_lr, 1.0)
+
+        def _lr_lambda(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return max(float(step + 1) / float(warmup_steps), 1e-8)
+            decay_steps = max(total_steps - warmup_steps, 1)
+            progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return max(min_factor, cosine)
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda), True
+
     msg = f"Unsupported scheduler: {name}"
     raise ValueError(msg)
 
@@ -180,7 +210,11 @@ def train_retriever(
         lr=config.train.learning_rate,
         weight_decay=config.train.weight_decay,
     )
-    scheduler = _build_scheduler(config, optimizer)
+    scheduler, scheduler_step_per_batch = _build_scheduler(
+        config,
+        optimizer,
+        steps_per_epoch=max(len(train_loader), 1),
+    )
 
     amp_enabled = bool(config.train.amp_enabled and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
@@ -217,6 +251,8 @@ def train_retriever(
                 nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
+                if scheduler is not None and scheduler_step_per_batch:
+                    scheduler.step()
                 losses.append(float(loss.item()))
 
             epoch_loss = float(np.mean(losses)) if losses else 0.0
@@ -235,7 +271,9 @@ def train_retriever(
             log_metrics({"learning_rate": optimizer.param_groups[0]["lr"]}, step=epoch)
 
             if scheduler is not None:
-                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if scheduler_step_per_batch:
+                    pass
+                elif isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                     scheduler.step(eval_result.metrics["ndcg@10"])
                 else:
                     scheduler.step()

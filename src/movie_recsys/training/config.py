@@ -92,11 +92,12 @@ class TrainConfig(BaseModel):
     epochs: int = 3
     amp_enabled: bool = True
     max_grad_norm: float = 1.0
-    scheduler: Literal["none", "cosine", "plateau"] = "none"
+    scheduler: Literal["none", "cosine", "plateau", "warmup_cosine"] = "none"
     scheduler_t_max: int = 10
     scheduler_patience: int = 2
     scheduler_factor: float = 0.5
     min_learning_rate: float = 1e-6
+    warmup_steps: int = 100
 
 
 class RetrievalConfig(BaseModel):
@@ -205,6 +206,7 @@ def load_retrieval_config(
             scheduler_patience=train.get("scheduler_patience", 2),
             scheduler_factor=train.get("scheduler_factor", 0.5),
             min_learning_rate=train.get("min_learning_rate", 1e-6),
+            warmup_steps=train.get("warmup_steps", 100),
         ),
         mlflow_tracking_uri=raw.get("mlflow_tracking_uri", env.MLFLOW_TRACKING_URI),
         mlflow_artifact_root=raw.get("mlflow_artifact_root", env.MLFLOW_ARTIFACT_ROOT),
