@@ -64,7 +64,7 @@ class DataFilesConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model_type: Literal["baseline", "transformer"] = "baseline"
+    model_type: Literal["baseline", "transformer", "residual_transformer"] = "baseline"
     embedding_dim: int = 128
     user_id_embedding_dim: int = 64
     item_id_embedding_dim: int = 64
@@ -76,6 +76,7 @@ class ModelConfig(BaseModel):
     transformer_heads: int = 4
     transformer_ffn_dim: int = 512
     sequence_pooling: Literal["last", "mean"] = "last"
+    initial_transformer_gate: float = -2.944
 
 
 class TrainConfig(BaseModel):
@@ -92,6 +93,7 @@ class TrainConfig(BaseModel):
     epochs: int = 3
     amp_enabled: bool = True
     max_grad_norm: float = 1.0
+    gradient_clip_norm: float = 1.0
     scheduler: Literal["none", "cosine", "plateau", "warmup_cosine"] = "none"
     scheduler_t_max: int = 10
     scheduler_patience: int = 2
@@ -188,6 +190,7 @@ def load_retrieval_config(
             transformer_heads=model.get("transformer_heads", 4),
             transformer_ffn_dim=model.get("transformer_ffn_dim", 512),
             sequence_pooling=model.get("sequence_pooling", "last"),
+            initial_transformer_gate=model.get("initial_transformer_gate", -2.944),
         ),
         train=TrainConfig(
             random_seed=train.get("random_seed", env.RANDOM_SEED),
@@ -201,6 +204,10 @@ def load_retrieval_config(
             epochs=train.get("epochs", env.EPOCHS),
             amp_enabled=train.get("amp_enabled", env.AMP_ENABLED),
             max_grad_norm=train.get("max_grad_norm", 1.0),
+            gradient_clip_norm=train.get(
+                "gradient_clip_norm",
+                train.get("max_grad_norm", 1.0),
+            ),
             scheduler=train.get("scheduler", "none"),
             scheduler_t_max=train.get("scheduler_t_max", 10),
             scheduler_patience=train.get("scheduler_patience", 2),

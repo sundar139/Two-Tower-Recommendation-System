@@ -22,7 +22,9 @@ def save_markdown(path: Path, content: str) -> None:
 
 def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, path)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temp_path)
+    temp_path.replace(path)
 
 
 def load_checkpoint(path: Path) -> dict[str, Any]:

@@ -19,6 +19,7 @@ from movie_recsys.modeling.faiss_index import (
     save_faiss_bundle,
     search_index,
 )
+from movie_recsys.modeling.residual_transformer_retrieval import ResidualTransformerRetriever
 from movie_recsys.modeling.retrieval import BaselineRetriever
 from movie_recsys.modeling.transformer_retrieval import TransformerRetriever
 from movie_recsys.training.config import load_retrieval_config
@@ -39,13 +40,19 @@ def main(
     config: Path = typer.Option(Path("configs/retrieval.yaml"), "--config"),
     checkpoint: Path | None = typer.Option(None, "--checkpoint"),
     sample: bool = typer.Option(False, "--sample"),
-    model_type: Literal["baseline", "transformer"] | None = typer.Option(None, "--model-type"),
+    model_type: Literal["baseline", "transformer", "residual_transformer"] | None = typer.Option(
+        None,
+        "--model-type",
+    ),
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
     normalized_model_type = model_type or cfg.model.model_type
     if normalized_model_type == "two_tower":
         normalized_model_type = "baseline"
-    cfg.model.model_type = cast(Literal["baseline", "transformer"], normalized_model_type)
+    cfg.model.model_type = cast(
+        Literal["baseline", "transformer", "residual_transformer"],
+        normalized_model_type,
+    )
     experiment = configure_mlflow(cfg)
     tables = load_feature_tables(cfg)
 
@@ -58,6 +65,8 @@ def main(
     }
     if normalized_model_type == "transformer":
         model = TransformerRetriever(**common_kwargs)
+    elif normalized_model_type == "residual_transformer":
+        model = ResidualTransformerRetriever(**common_kwargs)
     else:
         model = BaselineRetriever(**common_kwargs)
 

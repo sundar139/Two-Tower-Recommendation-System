@@ -23,11 +23,18 @@ from movie_recsys.training.config import load_retrieval_config
 app = typer.Typer(add_completion=False)
 
 
-def _history_stats(users_df: pl.DataFrame) -> dict[str, float]:
+def _history_stats(users_df: pl.DataFrame, *, history_length: int) -> dict[str, float]:
     histories = users_df.get_column("train_history_item_idx").to_list()
     lengths = np.asarray([len(v or []) for v in histories], dtype=np.float32)
+    truncated_lengths = np.clip(lengths, 0.0, float(history_length))
     return {
-        "avg_non_padding_history_length": float(lengths.mean()) if lengths.size else 0.0,
+        "raw_history_length_before_truncation": float(lengths.mean()) if lengths.size else 0.0,
+        "model_history_length_after_truncation": (
+            float(truncated_lengths.mean()) if truncated_lengths.size else 0.0
+        ),
+        "valid_tokens_seen_by_transformer": (
+            float(truncated_lengths.mean()) if truncated_lengths.size else 0.0
+        ),
         "pct_users_empty_history": float((lengths == 0).mean() * 100.0) if lengths.size else 0.0,
         "pct_users_history_len_1": float((lengths == 1).mean() * 100.0) if lengths.size else 0.0,
     }
@@ -138,7 +145,7 @@ def main(
     users_df = pl.read_parquet(cfg.users_path)
     train_df = pl.read_parquet(cfg.train_path)
     val_df = pl.read_parquet(cfg.val_path)
-    history_stats = _history_stats(users_df)
+    history_stats = _history_stats(users_df, history_length=cfg.train.history_length)
 
     loss_at_steps: dict[int, float] = {}
     nan_or_inf_detected = False

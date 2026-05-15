@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, cast
 
@@ -117,6 +118,9 @@ def log_training_params(config: RetrievalConfig) -> None:
         "transformer_heads": config.model.transformer_heads,
         "transformer_ffn_dim": config.model.transformer_ffn_dim,
         "sequence_pooling": config.model.sequence_pooling,
+        "transformer_gate_initial_alpha": float(
+            1.0 / (1.0 + math.exp(-config.model.initial_transformer_gate))
+        ),
         "attention_type": "scaled_dot_product_attention",
     }
     mlflow.log_params(params)
