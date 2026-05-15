@@ -4,6 +4,8 @@
 
 The project now supports two user-sequence encoders while keeping the same item tower and in-batch retrieval loss.
 
+It now also supports a residual transformer variant that starts from baseline behavior and adds gated transformer refinement.
+
 ## Baseline Versus Transformer
 
 - Baseline retriever user tower: mean pooling over history item embeddings.
@@ -16,6 +18,12 @@ Shared properties:
 - item ID embedding + item feature MLP
 - final projection to a shared embedding space
 - L2-normalized user/item vectors
+
+Residual transformer specific properties:
+
+- user sequence is blended as `baseline_context + sigmoid(gate) * (transformer_context - baseline_context)`
+- gate is initialized near baseline (`initial_transformer_gate: -2.944`, alpha ~0.05)
+- model can be initialized from a baseline checkpoint (`--init-from-baseline`)
 
 ## Transformer Sequence Encoder Details
 
@@ -69,6 +77,16 @@ uv run python scripts/evaluate_retriever.py --config configs/transformer_retriev
 uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split test --sample
 ```
 
+## Sample Residual Transformer
+
+```powershell
+uv run python scripts/train_retriever.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer --init-from-baseline artifacts/models/best_baseline_retriever.pt
+uv run python scripts/run_residual_transformer_ablation.py --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split test --sample
+uv run python scripts/compare_retrievers.py --sample
+```
+
 ## Sample Ablation
 
 ```powershell
@@ -87,9 +105,39 @@ uv run python scripts/export_faiss_index.py --config configs/transformer_retriev
 
 Only run the full commands if sample validation beats the baseline and recall remains stable.
 
+## Full Residual Commands
+
+```powershell
+uv run python scripts/run_full_residual_training.py --max-runtime-hours 4
+```
+
+Resume full residual training:
+
+```powershell
+uv run python scripts/run_full_residual_training.py --resume-from artifacts/models/checkpoints/residual_transformer_epoch_3.pt --max-runtime-hours 4
+```
+
+Evaluation-only full residual workflow:
+
+```powershell
+uv run python scripts/run_full_residual_training.py --evaluate-only
+```
+
+Acceptance checker:
+
+```powershell
+uv run python scripts/check_residual_acceptance.py --summary artifacts/reports/full_residual_transformer_summary.json
+```
+
+CL-EPIDTN remains blocked until residual full-data acceptance passes, or residual is explicitly treated as experimental.
+
 ## Failure Analysis (Current)
 
 Previous sample transformer run underperformed both popularity and baseline. Stabilization diagnostics show:
+
+- `raw_history_length_before_truncation`: `79.131`
+- `model_history_length_after_truncation`: `34.057`
+- `valid_tokens_seen_by_transformer`: `34.057`
 
 - no NaN/inf in logits or embeddings
 - loss decreases over short-run steps (10 -> 100)
@@ -117,19 +165,22 @@ Key settings:
 | Split | Model | HR@10 | MRR@10 | NDCG@10 | Recall@50 |
 |---|---|---:|---:|---:|---:|
 | val | popularity | 0.047000 | 0.017380 | 0.024347 | 0.146000 |
-| val | baseline | 0.055000 | 0.016221 | 0.025047 | 0.155000 |
-| val | transformer (stable) | 0.037000 | 0.012628 | 0.018203 | 0.124000 |
+| val | baseline | 0.050000 | 0.014749 | 0.022808 | 0.150000 |
+| val | transformer (stable) | 0.036000 | 0.010375 | 0.016133 | 0.130000 |
+| val | residual transformer | 0.055000 | 0.018227 | 0.026668 | 0.156000 |
 | test | popularity | 0.039000 | 0.012310 | 0.018442 | 0.122000 |
-| test | baseline | 0.035000 | 0.008891 | 0.014924 | 0.132000 |
-| test | transformer (stable) | 0.021000 | 0.009515 | 0.012216 | 0.112000 |
+| test | baseline | 0.028000 | 0.008383 | 0.012850 | 0.117000 |
+| test | transformer (stable) | 0.022000 | 0.008679 | 0.011733 | 0.100000 |
+| test | residual transformer | 0.035000 | 0.007512 | 0.013695 | 0.130000 |
 
 ## MLflow Run Links
 
-- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/e9bf170a6e324b9ca7917d994cd939f5`
-- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/4940a9671a354a8fa27c8c9f4cf809fa`
-- stable transformer sample val eval: `http://127.0.0.1:5000/#/experiments/1/runs/6b0778d71388441fb1ebd40bf6cead3b`
-- stable transformer sample test eval: `http://127.0.0.1:5000/#/experiments/1/runs/8cfcb807deda4aacbedab923e4910775`
-- best ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/745306f30a1145ef97e7f4bd716a0b68`
+- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/300602b1ac22462d957c9ab180df903c`
+- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/181a2151033041d4aa4ec54d1d1c15bc`
+- residual sample train: `http://127.0.0.1:5000/#/experiments/1/runs/d753cc7d2cfd477786284ae464cde99c`
+- best residual ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/a23e7bfa2e4b4273abad6acbd7925109`
+- residual sample val eval: `http://127.0.0.1:5000/#/experiments/1/runs/2015307a14b14e9a922269be082091aa`
+- residual sample test eval: `http://127.0.0.1:5000/#/experiments/1/runs/f77c96a712f04439b5637f72f95dda32`
 
 ## Metrics Table (Fill After Runs)
 
@@ -138,9 +189,11 @@ Key settings:
 | val | popularity | - | - | - | - |
 | val | baseline | - | - | - | - |
 | val | transformer | - | - | - | - |
+| val | residual_transformer | - | - | - | - |
 | test | popularity | - | - | - | - |
 | test | baseline | - | - | - | - |
 | test | transformer | - | - | - | - |
+| test | residual_transformer | - | - | - | - |
 
 ## Current Limitations
 

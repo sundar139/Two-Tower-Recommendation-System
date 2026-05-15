@@ -28,6 +28,9 @@ Implemented in Step 3 (transformer retrieval encoder):
 - Padding-aware and causal masking to prevent leakage
 - Configurable sequence pooling (`last` or `mean`)
 - TransformerRetriever integrated into train/eval/export workflow
+- Residual transformer retriever with gated baseline + transformer blending
+- Baseline-checkpoint initialization flow for residual retriever
+- Residual sample ablation and four-way comparison tooling
 
 Not yet implemented in this step:
 
@@ -117,31 +120,62 @@ uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sa
 ## Step 3 Transformer Commands
 
 ```powershell
-uv run python scripts/diagnose_transformer_retriever.py --config configs/transformer_retrieval.yaml --sample
+uv run python scripts/diagnose_transformer_retriever.py --config configs/transformer_retrieval_stable.yaml --sample
 uv run python scripts/run_transformer_ablation.py --sample
 uv run python scripts/train_retriever.py --config configs/transformer_retrieval_stable.yaml --sample --model-type transformer
 uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split val --sample
 uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split test --sample
+uv run python scripts/train_retriever.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer --init-from-baseline artifacts/models/best_baseline_retriever.pt
+uv run python scripts/run_residual_transformer_ablation.py --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split test --sample
 uv run python scripts/compare_retrievers.py --sample
+uv run python scripts/export_faiss_index.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer
+```
+
+## Full Residual Validation Commands
+
+```powershell
+uv run python scripts/run_full_residual_training.py --max-runtime-hours 4
+```
+
+Resume from checkpoint:
+
+```powershell
+uv run python scripts/run_full_residual_training.py --resume-from artifacts/models/checkpoints/residual_transformer_epoch_3.pt --max-runtime-hours 4
+```
+
+Evaluation-only mode (skip train and use latest residual checkpoint):
+
+```powershell
+uv run python scripts/run_full_residual_training.py --evaluate-only
+```
+
+Acceptance checker:
+
+```powershell
+uv run python scripts/check_residual_acceptance.py --summary artifacts/reports/full_residual_transformer_summary.json
 ```
 
 ## Transformer Stabilization Status
 
-Latest sample comparison (stabilization attempt):
+Latest sample comparison (post-residual recovery):
 
 - popularity val NDCG@10: `0.024347`
-- baseline val NDCG@10: `0.025047`
-- stable transformer val NDCG@10: `0.018203`
+- baseline val NDCG@10: `0.022808`
+- stable transformer val NDCG@10: `0.016133`
+- residual transformer val NDCG@10: `0.026668`
 
-Result: transformer remains below baseline and popularity on sample validation NDCG@10.
+Result: pure transformer remains below baseline/popularity, but residual transformer now beats both on sample validation NDCG@10.
 
-Step 3 is not approved yet. CL-EPIDTN contrastive learning remains blocked until transformer baseline quality is recovered.
+CL-EPIDTN contrastive learning remains blocked until full-data residual validation passes acceptance criteria or residual is explicitly marked experimental.
 
-Example MLflow run URLs from stabilization:
+Example MLflow run URLs from residual recovery:
 
-- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/e9bf170a6e324b9ca7917d994cd939f5`
-- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/4940a9671a354a8fa27c8c9f4cf809fa`
-- best ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/745306f30a1145ef97e7f4bd716a0b68`
+- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/300602b1ac22462d957c9ab180df903c`
+- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/181a2151033041d4aa4ec54d1d1c15bc`
+- residual sample train (baseline-init): `http://127.0.0.1:5000/#/experiments/1/runs/d753cc7d2cfd477786284ae464cde99c`
+- best residual ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/a23e7bfa2e4b4273abad6acbd7925109`
 
 ## Step 2 Validation Commands
 
