@@ -453,19 +453,31 @@ def train_retriever(
     )
 
     try:
+        existing_run_params = dict(run.data.params)
+
+        def _safe_log_param(key: str, value: str) -> None:
+            existing_value = existing_run_params.get(key)
+            if existing_value is None:
+                mlflow.log_param(key, value)
+                existing_run_params[key] = value
+                return
+            if existing_value != value:
+                mlflow.set_tag(f"resume_param_{key}", value)
+
         set_retrieval_tags(model_type=normalized_model_type, split="val", sample=sample)
-        log_training_params(config)
-        mlflow.log_param("run_name", default_run_name)
-        mlflow.log_param(
+        if not resumed_existing_run:
+            log_training_params(config)
+        _safe_log_param("run_name", default_run_name)
+        _safe_log_param(
             "init_from_baseline",
             str(init_from_baseline) if init_from_baseline else "",
         )
-        mlflow.log_param("allow_random_init", str(allow_random_init).lower())
-        mlflow.log_param("checkpoint_every_epoch", str(checkpoint_every_epoch).lower())
-        mlflow.log_param("eval_every_epoch", str(eval_every_epoch).lower())
-        mlflow.log_param("save_last", str(save_last).lower())
-        mlflow.log_param("resume_from", str(resume_from) if resume_from else "")
-        mlflow.log_param(
+        _safe_log_param("allow_random_init", str(allow_random_init).lower())
+        _safe_log_param("checkpoint_every_epoch", str(checkpoint_every_epoch).lower())
+        _safe_log_param("eval_every_epoch", str(eval_every_epoch).lower())
+        _safe_log_param("save_last", str(save_last).lower())
+        _safe_log_param("resume_from", str(resume_from) if resume_from else "")
+        _safe_log_param(
             "max_runtime_hours",
             "" if max_runtime_hours is None else str(max_runtime_hours),
         )
@@ -479,16 +491,17 @@ def train_retriever(
                 if resumed_mlflow_run_id:
                     mlflow.set_tag("resumed_from_run_id", resumed_mlflow_run_id)
         if baseline_init_summary is not None:
-            mlflow.log_params(
-                {
-                    "baseline_init_loaded_keys": baseline_init_summary["loaded_keys"],
-                    "baseline_init_skipped_missing_keys": baseline_init_summary[
-                        "skipped_missing_keys"
-                    ],
-                    "baseline_init_skipped_shape_mismatch_keys": baseline_init_summary[
-                        "skipped_shape_mismatch_keys"
-                    ],
-                }
+            _safe_log_param(
+                "baseline_init_loaded_keys",
+                str(baseline_init_summary["loaded_keys"]),
+            )
+            _safe_log_param(
+                "baseline_init_skipped_missing_keys",
+                str(baseline_init_summary["skipped_missing_keys"]),
+            )
+            _safe_log_param(
+                "baseline_init_skipped_shape_mismatch_keys",
+                str(baseline_init_summary["skipped_shape_mismatch_keys"]),
             )
 
         for epoch in range(start_epoch, config.train.epochs):
@@ -526,7 +539,7 @@ def train_retriever(
             log_metrics({"train_loss": epoch_loss}, step=epoch)
 
             eval_result = None
-            if eval_every_epoch:
+            if eval_every_epoch and not stopped_due_to_runtime:
                 eval_result, _embeddings, _latency = evaluate_two_tower(
                     cast(RetrieverModel, model),
                     train_df,
