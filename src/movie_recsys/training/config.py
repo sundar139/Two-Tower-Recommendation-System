@@ -89,6 +89,12 @@ class ModelConfig(BaseModel):
     augmentation_crop_min_ratio: float = 0.70
     augmentation_reorder_prob: float = 0.10
     augmentation_reorder_window: int = 3
+    use_contrastive_projection_head: bool = True
+    contrastive_projection_dim: int = 128
+    contrastive_warmup_epochs: int = 2
+    contrastive_decay_start_epoch: int | None = None
+    contrastive_min_weight_scale: float = 1.0
+    lambda_residual_anchor: float = 0.01
 
 
 class TrainConfig(BaseModel):
@@ -213,6 +219,12 @@ def load_retrieval_config(
             augmentation_crop_min_ratio=model.get("augmentation_crop_min_ratio", 0.70),
             augmentation_reorder_prob=model.get("augmentation_reorder_prob", 0.10),
             augmentation_reorder_window=model.get("augmentation_reorder_window", 3),
+            use_contrastive_projection_head=model.get("use_contrastive_projection_head", True),
+            contrastive_projection_dim=model.get("contrastive_projection_dim", 128),
+            contrastive_warmup_epochs=model.get("contrastive_warmup_epochs", 2),
+            contrastive_decay_start_epoch=model.get("contrastive_decay_start_epoch"),
+            contrastive_min_weight_scale=model.get("contrastive_min_weight_scale", 1.0),
+            lambda_residual_anchor=model.get("lambda_residual_anchor", 0.01),
         ),
         train=TrainConfig(
             random_seed=train.get("random_seed", env.RANDOM_SEED),

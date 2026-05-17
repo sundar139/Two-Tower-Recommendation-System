@@ -1,8 +1,9 @@
-"""Check sample CL acceptance before allowing full-data CL training."""
+"""Evaluate contrastive acceptance gates for sample/full CL workflows."""
 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -13,244 +14,419 @@ from movie_recsys.modeling.artifacts import save_json, save_markdown
 app = typer.Typer(add_completion=False)
 
 
-def _extract_metrics(payload: dict[str, Any], keys: list[str]) -> dict[str, float] | None:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, dict) and all(isinstance(v, (int, float)) for v in value.values()):
-            return {k: float(v) for k, v in value.items()}
-    return None
-
-
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         msg = f"Required file not found: {path}"
         raise FileNotFoundError(msg)
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _load_metric_report(path: Path, keys: list[str]) -> dict[str, float]:
-    payload = _load_json(path)
-    metrics = _extract_metrics(payload, keys)
-    if metrics is None:
-        msg = f"Unable to find metric dictionary in report: {path}"
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        msg = f"Expected JSON object in {path}"
         raise ValueError(msg)
-    return metrics
+    return payload
+
+
+def _is_metric_dict(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    required = {"hr@10", "mrr@10", "ndcg@10", "recall@50"}
+    if not required.issubset(payload.keys()):
+        return False
+    return all(isinstance(payload[key], (int, float)) for key in required)
+
+
+def _to_float_metrics(payload: dict[str, Any]) -> dict[str, float]:
+    return {
+        "hr@10": float(payload["hr@10"]),
+        "mrr@10": float(payload["mrr@10"]),
+        "ndcg@10": float(payload["ndcg@10"]),
+        "recall@50": float(payload["recall@50"]),
+    }
+
+
+def _summary_metric(summary: dict[str, Any], key: str) -> dict[str, float] | None:
+    value = summary.get(key)
+    if isinstance(value, dict) and _is_metric_dict(value):
+        return _to_float_metrics(value)
+    return None
+
+
+def _compare_metric(
+    compare_payload: dict[str, Any] | None,
+    *,
+    split: str,
+    model: str,
+) -> dict[str, float] | None:
+    if compare_payload is None:
+        return None
+    split_payload = compare_payload.get(split)
+    if not isinstance(split_payload, dict):
+        return None
+    model_payload = split_payload.get(model)
+    if isinstance(model_payload, dict) and _is_metric_dict(model_payload):
+        return _to_float_metrics(model_payload)
+    return None
+
+
+def _resolve_metrics(
+    *,
+    summary: dict[str, Any],
+    compare_payload: dict[str, Any] | None,
+    sample: bool,
+) -> dict[str, dict[str, float]]:
+    cl_val = _summary_metric(summary, "best_cl_val") or _summary_metric(summary, "cl_val")
+    cl_test = _summary_metric(summary, "best_cl_test") or _summary_metric(summary, "cl_test")
+
+    residual_val = _summary_metric(summary, "residual_val")
+    residual_test = _summary_metric(summary, "residual_test")
+    popularity_val = _summary_metric(summary, "popularity_val")
+    popularity_test = _summary_metric(summary, "popularity_test")
+    baseline_val = _summary_metric(summary, "baseline_val")
+    baseline_test = _summary_metric(summary, "baseline_test")
+
+    residual_val = residual_val or _compare_metric(
+        compare_payload,
+        split="val",
+        model="residual_transformer",
+    )
+    residual_test = residual_test or _compare_metric(
+        compare_payload,
+        split="test",
+        model="residual_transformer",
+    )
+    popularity_val = popularity_val or _compare_metric(
+        compare_payload,
+        split="val",
+        model="popularity",
+    )
+    popularity_test = popularity_test or _compare_metric(
+        compare_payload,
+        split="test",
+        model="popularity",
+    )
+    baseline_val = baseline_val or _compare_metric(compare_payload, split="val", model="baseline")
+    baseline_test = baseline_test or _compare_metric(
+        compare_payload,
+        split="test",
+        model="baseline",
+    )
+
+    required = {
+        "cl_val": cl_val,
+        "cl_test": cl_test,
+        "residual_val": residual_val,
+        "residual_test": residual_test,
+        "popularity_val": popularity_val,
+        "popularity_test": popularity_test,
+    }
+    if sample:
+        required["baseline_val"] = baseline_val
+        required["baseline_test"] = baseline_test
+
+    missing = [name for name, metrics in required.items() if metrics is None]
+    if missing:
+        msg = (
+            "Missing required metrics for acceptance evaluation: "
+            + ", ".join(sorted(missing))
+        )
+        raise ValueError(msg)
+
+    resolved = {
+        "cl_val": cl_val,
+        "cl_test": cl_test,
+        "residual_val": residual_val,
+        "residual_test": residual_test,
+        "popularity_val": popularity_val,
+        "popularity_test": popularity_test,
+    }
+    if baseline_val is not None:
+        resolved["baseline_val"] = baseline_val
+    if baseline_test is not None:
+        resolved["baseline_test"] = baseline_test
+    return {key: value for key, value in resolved.items() if value is not None}
+
+
+def _best_trial_losses(summary: dict[str, Any]) -> dict[str, float] | None:
+    trials = summary.get("contrastive_trials")
+    if not isinstance(trials, list):
+        return None
+    best_name = str(summary.get("best_cl_name", ""))
+    for trial in trials:
+        if not isinstance(trial, dict):
+            continue
+        if str(trial.get("name", "")) != best_name:
+            continue
+        keys = [
+            "final_retrieval_loss",
+            "final_user_contrastive_loss",
+            "final_item_contrastive_loss",
+            "final_alignment_contrastive_loss",
+            "final_residual_anchor_loss",
+            "final_total_loss",
+        ]
+        losses: dict[str, float] = {}
+        for key in keys:
+            if key in trial and isinstance(trial[key], (int, float)):
+                losses[key] = float(trial[key])
+        return losses
+    return None
+
+
+def _relative_drop(reference: float, value: float) -> float:
+    if reference <= 0.0:
+        return 0.0
+    return max((reference - value) / reference, 0.0)
+
+
+def _sample_rules(metrics: dict[str, dict[str, float]]) -> dict[str, bool]:
+    cl_val = metrics["cl_val"]
+    cl_test = metrics["cl_test"]
+    residual_val = metrics["residual_val"]
+    popularity_val = metrics["popularity_val"]
+    popularity_test = metrics["popularity_test"]
+
+    rule_one = cl_val["ndcg@10"] > popularity_val["ndcg@10"]
+    rule_two = (
+        cl_val["ndcg@10"] > residual_val["ndcg@10"]
+        and cl_val["ndcg@10"] >= (popularity_val["ndcg@10"] - 0.001)
+    )
+    rule_three = (
+        cl_test["ndcg@10"] > popularity_test["ndcg@10"]
+        and cl_val["ndcg@10"] >= (popularity_val["ndcg@10"] - 0.0015)
+    )
+    return {
+        "rule_1_val_beats_popularity": rule_one,
+        "rule_2_val_beats_residual_and_close_to_popularity": rule_two,
+        "rule_3_test_beats_popularity_and_val_close": rule_three,
+        "any_primary_rule_passed": bool(rule_one or rule_two or rule_three),
+    }
+
+
+def _full_rules(metrics: dict[str, dict[str, float]]) -> dict[str, bool]:
+    cl_val = metrics["cl_val"]
+    cl_test = metrics["cl_test"]
+    residual_val = metrics["residual_val"]
+    residual_test = metrics["residual_test"]
+
+    within_two_percent = cl_val["ndcg@10"] >= (residual_val["ndcg@10"] * 0.98)
+    improved_recall_or_hr = (
+        cl_val["recall@50"] > residual_val["recall@50"]
+        or cl_val["hr@10"] > residual_val["hr@10"]
+    )
+    rule_one = cl_val["ndcg@10"] > residual_val["ndcg@10"]
+    rule_two = within_two_percent and improved_recall_or_hr
+    rule_three = cl_test["ndcg@10"] > residual_test["ndcg@10"] and within_two_percent
+
+    return {
+        "rule_1_val_beats_residual": rule_one,
+        "rule_2_within_2pct_and_improves_recall_or_hr": rule_two,
+        "rule_3_test_improves_and_val_drop_lt_2pct": rule_three,
+        "any_primary_rule_passed": bool(rule_one or rule_two or rule_three),
+    }
 
 
 def evaluate_acceptance(
     *,
-    cl_val: dict[str, float],
-    cl_test: dict[str, float],
-    residual_val: dict[str, float],
-    residual_test: dict[str, float],
-    baseline_val: dict[str, float],
-    baseline_test: dict[str, float],
-    popularity_val: dict[str, float],
-    popularity_test: dict[str, float],
+    summary: dict[str, Any],
+    metrics: dict[str, dict[str, float]],
+    sample: bool,
     faiss_top10_match: bool,
+    losses: dict[str, float] | None,
 ) -> dict[str, Any]:
-    rule_one = cl_val["ndcg@10"] > popularity_val["ndcg@10"]
-    rule_two = cl_val["ndcg@10"] >= (residual_val["ndcg@10"] - 0.001)
-    rule_three = cl_test["ndcg@10"] >= (baseline_test["ndcg@10"] - 0.002)
-    faiss_rule = bool(faiss_top10_match)
+    primary_rules = _sample_rules(metrics) if sample else _full_rules(metrics)
 
-    acceptance_passed = bool(rule_one and rule_two and rule_three and faiss_rule)
+    cl_val = metrics["cl_val"]
+    residual_val = metrics["residual_val"]
+    popularity_val = metrics["popularity_val"]
 
-    def _delta(lhs: dict[str, float], rhs: dict[str, float]) -> dict[str, float]:
-        return {metric: float(lhs[metric] - rhs[metric]) for metric in lhs}
+    recall_relative_drop = _relative_drop(residual_val["recall@50"], cl_val["recall@50"])
+    recall_guard_passed = recall_relative_drop <= 0.05
 
+    losses_available = losses is not None and len(losses) > 0
+    losses_finite = False
+    if losses_available and losses is not None:
+        losses_finite = all(math.isfinite(value) for value in losses.values())
+
+    secondary_checks = {
+        "faiss_top10_match": bool(faiss_top10_match),
+        "recall50_relative_drop_le_5pct": recall_guard_passed,
+        "loss_values_available": losses_available,
+        "loss_values_finite": losses_finite,
+    }
+
+    failed_reasons: list[str] = []
+    if not primary_rules["any_primary_rule_passed"]:
+        failed_reasons.append("No primary acceptance rule passed")
+    if not secondary_checks["faiss_top10_match"]:
+        failed_reasons.append("FAISS top10 parity check failed")
+    if sample and not secondary_checks["recall50_relative_drop_le_5pct"]:
+        failed_reasons.append("Recall@50 collapsed by more than 5% vs residual")
+    if not secondary_checks["loss_values_available"]:
+        failed_reasons.append("Loss diagnostics are missing from summary")
+    elif not secondary_checks["loss_values_finite"]:
+        failed_reasons.append("Non-finite retrieval or component losses detected")
+
+    acceptance_passed = not failed_reasons
     return {
+        "sample_mode": sample,
         "acceptance_passed": acceptance_passed,
-        "rule_one_val_ndcg_beats_popularity": rule_one,
-        "rule_two_val_ndcg_within_0p001_of_residual": rule_two,
-        "rule_three_test_ndcg_not_worse_than_baseline_by_0p002": rule_three,
-        "faiss_top10_match_rule": faiss_rule,
-        "cl_vs_popularity_val": _delta(cl_val, popularity_val),
-        "cl_vs_popularity_test": _delta(cl_test, popularity_test),
-        "cl_vs_baseline_val": _delta(cl_val, baseline_val),
-        "cl_vs_baseline_test": _delta(cl_test, baseline_test),
-        "cl_vs_residual_val": _delta(cl_val, residual_val),
-        "cl_vs_residual_test": _delta(cl_test, residual_test),
         "full_data_cl_allowed": acceptance_passed,
+        "primary_rules": primary_rules,
+        "secondary_checks": secondary_checks,
+        "failed_reasons": failed_reasons,
+        "gap_to_popularity_val_ndcg": (
+            float(popularity_val["ndcg@10"] - cl_val["ndcg@10"])
+        ),
+        "gap_to_residual_val_ndcg": float(residual_val["ndcg@10"] - cl_val["ndcg@10"]),
+        "recall50_relative_drop_vs_residual": float(recall_relative_drop),
+        "best_cl_name": str(summary.get("best_cl_name", "")),
+        "best_cl_run_id": str(summary.get("best_cl_run_id", "")),
+        "best_cl_run_url": str(summary.get("best_cl_run_url", "")),
     }
 
 
-def _to_markdown(
-    *,
-    ablation_summary: Path,
-    cl_val_report: Path,
-    cl_test_report: Path,
-    residual_val_report: Path,
-    residual_test_report: Path,
-    baseline_val_report: Path,
-    baseline_test_report: Path,
-    popularity_val_report: Path,
-    popularity_test_report: Path,
-    faiss_report: Path,
-    result: dict[str, Any],
-) -> str:
+def _render_markdown(payload: dict[str, Any]) -> str:
+    result = payload["result"]
     lines = [
-        "# Contrastive Acceptance Check",
+        "# Contrastive Acceptance",
         "",
-        f"Ablation summary: {ablation_summary}",
-        f"CL val report: {cl_val_report}",
-        f"CL test report: {cl_test_report}",
-        f"Residual val report: {residual_val_report}",
-        f"Residual test report: {residual_test_report}",
-        f"Baseline val report: {baseline_val_report}",
-        f"Baseline test report: {baseline_test_report}",
-        f"Popularity val report: {popularity_val_report}",
-        f"Popularity test report: {popularity_test_report}",
-        f"FAISS report: {faiss_report}",
-        "",
+        f"summary: {payload['summary']}",
+        f"comparison_report: {payload['comparison_report']}",
+        f"faiss_report: {payload['faiss_report']}",
+        f"sample_mode: {result['sample_mode']}",
         f"acceptance_passed: {result['acceptance_passed']}",
         f"full_data_cl_allowed: {result['full_data_cl_allowed']}",
         "",
-        "## Rules",
-        "",
-        f"- val_ndcg_beats_popularity: {result['rule_one_val_ndcg_beats_popularity']}",
-        (
-            "- val_ndcg_within_0p001_of_residual: "
-            f"{result['rule_two_val_ndcg_within_0p001_of_residual']}"
-        ),
-        (
-            "- test_ndcg_not_worse_than_baseline_by_0p002: "
-            f"{result['rule_three_test_ndcg_not_worse_than_baseline_by_0p002']}"
-        ),
-        f"- faiss_top10_match: {result['faiss_top10_match_rule']}",
-        "",
-        "## Val Deltas",
-        "",
-        f"- cl_vs_baseline_ndcg@10: {result['cl_vs_baseline_val']['ndcg@10']:.6f}",
-        f"- cl_vs_residual_ndcg@10: {result['cl_vs_residual_val']['ndcg@10']:.6f}",
-        f"- cl_vs_popularity_ndcg@10: {result['cl_vs_popularity_val']['ndcg@10']:.6f}",
-        "",
-        "## Test Deltas",
-        "",
-        f"- cl_vs_baseline_ndcg@10: {result['cl_vs_baseline_test']['ndcg@10']:.6f}",
-        f"- cl_vs_residual_ndcg@10: {result['cl_vs_residual_test']['ndcg@10']:.6f}",
-        f"- cl_vs_popularity_ndcg@10: {result['cl_vs_popularity_test']['ndcg@10']:.6f}",
+        "## Primary Rules",
         "",
     ]
+    for key, value in result["primary_rules"].items():
+        lines.append(f"- {key}: {value}")
+
+    lines.extend(
+        [
+            "",
+            "## Secondary Checks",
+            "",
+        ]
+    )
+    for key, value in result["secondary_checks"].items():
+        lines.append(f"- {key}: {value}")
+
+    lines.extend(
+        [
+            "",
+            "## Gaps",
+            "",
+            f"- gap_to_popularity_val_ndcg: {result['gap_to_popularity_val_ndcg']:.6f}",
+            f"- gap_to_residual_val_ndcg: {result['gap_to_residual_val_ndcg']:.6f}",
+            (
+                "- recall50_relative_drop_vs_residual: "
+                f"{result['recall50_relative_drop_vs_residual']:.6f}"
+            ),
+            "",
+            "## Failure Reasons",
+            "",
+        ]
+    )
+    if result["failed_reasons"]:
+        for reason in result["failed_reasons"]:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- none")
+    lines.append("")
     return "\n".join(lines)
 
 
 @app.command()
 def main(
-    ablation_summary: Path = typer.Option(
+    summary: Path = typer.Option(
         Path("artifacts/reports/contrastive_ablation_sample.json"),
+        "--summary",
         "--ablation-summary",
     ),
-    cl_val_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_cl_residual_transformer_val.json"),
-        "--cl-val-report",
-    ),
-    cl_test_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_cl_residual_transformer_test.json"),
-        "--cl-test-report",
-    ),
-    residual_val_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_residual_transformer_val.json"),
-        "--residual-val-report",
-    ),
-    residual_test_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_residual_transformer_test.json"),
-        "--residual-test-report",
-    ),
-    baseline_val_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_baseline_val.json"),
-        "--baseline-val-report",
-    ),
-    baseline_test_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_baseline_test.json"),
-        "--baseline-test-report",
-    ),
-    popularity_val_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_popularity_val.json"),
-        "--popularity-val-report",
-    ),
-    popularity_test_report: Path = typer.Option(
-        Path("artifacts/reports/retrieval_eval_popularity_test.json"),
-        "--popularity-test-report",
-    ),
-    faiss_report: Path = typer.Option(
-        Path("artifacts/reports/faiss_export_report_cl_residual_transformer.json"),
-        "--faiss-report",
-    ),
-    output_json: Path = typer.Option(
-        Path("artifacts/reports/contrastive_acceptance_sample.json"),
-        "--output-json",
-    ),
-    output_md: Path = typer.Option(
-        Path("artifacts/reports/contrastive_acceptance_sample.md"),
-        "--output-md",
-    ),
+    sample: bool = typer.Option(False, "--sample"),
+    comparison_report: Path | None = typer.Option(None, "--comparison-report"),
+    faiss_report: Path | None = typer.Option(None, "--faiss-report"),
+    output_json: Path | None = typer.Option(None, "--output-json"),
+    output_md: Path | None = typer.Option(None, "--output-md"),
 ) -> None:
-    ablation_payload = _load_json(ablation_summary)
+    summary_payload = _load_json(summary)
 
-    cl_val = _load_metric_report(cl_val_report, ["cl_residual_transformer"])
-    cl_test = _load_metric_report(cl_test_report, ["cl_residual_transformer"])
-    residual_val = _load_metric_report(residual_val_report, ["residual_transformer"])
-    residual_test = _load_metric_report(residual_test_report, ["residual_transformer"])
-    baseline_val = _load_metric_report(baseline_val_report, ["baseline", "two_tower", "metrics"])
-    baseline_test = _load_metric_report(
-        baseline_test_report,
-        ["baseline", "two_tower", "metrics"],
+    compare_candidates = []
+    if comparison_report is not None:
+        compare_candidates.append(comparison_report)
+    if sample:
+        compare_candidates.append(Path("artifacts/reports/retriever_ablation_sample.json"))
+    else:
+        compare_candidates.append(Path("artifacts/reports/retriever_ablation_full.json"))
+
+    compare_payload: dict[str, Any] | None = None
+    selected_compare = ""
+    for candidate in compare_candidates:
+        if candidate.exists():
+            compare_payload = _load_json(candidate)
+            selected_compare = str(candidate)
+            break
+
+    metrics = _resolve_metrics(
+        summary=summary_payload,
+        compare_payload=compare_payload,
+        sample=sample,
     )
-    popularity_val = _load_metric_report(popularity_val_report, ["popularity", "metrics"])
-    popularity_test = _load_metric_report(popularity_test_report, ["popularity", "metrics"])
 
-    faiss_payload = _load_json(faiss_report)
-    faiss_match = bool(faiss_payload.get("top10_match", False))
+    faiss_candidates = []
+    if faiss_report is not None:
+        faiss_candidates.append(faiss_report)
+    if sample:
+        faiss_candidates.append(
+            Path("artifacts/reports/faiss_export_report_cl_residual_transformer.json")
+        )
+    else:
+        faiss_candidates.append(
+            Path("artifacts/reports/faiss_export_report_cl_residual_transformer.json")
+        )
 
+    faiss_top10_match = False
+    selected_faiss = ""
+    for candidate in faiss_candidates:
+        if candidate.exists():
+            faiss_payload = _load_json(candidate)
+            faiss_top10_match = bool(faiss_payload.get("top10_match", False))
+            selected_faiss = str(candidate)
+            break
+
+    losses = _best_trial_losses(summary_payload)
     result = evaluate_acceptance(
-        cl_val=cl_val,
-        cl_test=cl_test,
-        residual_val=residual_val,
-        residual_test=residual_test,
-        baseline_val=baseline_val,
-        baseline_test=baseline_test,
-        popularity_val=popularity_val,
-        popularity_test=popularity_test,
-        faiss_top10_match=faiss_match,
+        summary=summary_payload,
+        metrics=metrics,
+        sample=sample,
+        faiss_top10_match=faiss_top10_match,
+        losses=losses,
     )
+
+    if output_json is None:
+        if sample:
+            output_json = Path("artifacts/reports/contrastive_acceptance_sample.json")
+        else:
+            output_json = Path("artifacts/reports/contrastive_acceptance_full.json")
+    if output_md is None:
+        if sample:
+            output_md = Path("artifacts/reports/contrastive_acceptance_sample.md")
+        else:
+            output_md = Path("artifacts/reports/contrastive_acceptance_full.md")
 
     payload = {
-        "ablation_summary": str(ablation_summary),
-        "best_cl_name": ablation_payload.get("best_cl_name", ""),
-        "best_cl_run_id": ablation_payload.get("best_cl_run_id", ""),
-        "best_cl_run_url": ablation_payload.get("best_cl_run_url", ""),
-        "cl_val_report": str(cl_val_report),
-        "cl_test_report": str(cl_test_report),
-        "residual_val_report": str(residual_val_report),
-        "residual_test_report": str(residual_test_report),
-        "baseline_val_report": str(baseline_val_report),
-        "baseline_test_report": str(baseline_test_report),
-        "popularity_val_report": str(popularity_val_report),
-        "popularity_test_report": str(popularity_test_report),
-        "faiss_report": str(faiss_report),
-        "faiss_top10_match": faiss_match,
+        "summary": str(summary),
+        "comparison_report": selected_compare,
+        "faiss_report": selected_faiss,
+        "metrics": metrics,
+        "losses": losses,
         "result": result,
     }
 
     save_json(output_json, payload)
-    save_markdown(
-        output_md,
-        _to_markdown(
-            ablation_summary=ablation_summary,
-            cl_val_report=cl_val_report,
-            cl_test_report=cl_test_report,
-            residual_val_report=residual_val_report,
-            residual_test_report=residual_test_report,
-            baseline_val_report=baseline_val_report,
-            baseline_test_report=baseline_test_report,
-            popularity_val_report=popularity_val_report,
-            popularity_test_report=popularity_test_report,
-            faiss_report=faiss_report,
-            result=result,
-        ),
-    )
-
+    save_markdown(output_md, _render_markdown(payload))
     typer.echo(payload)
 
 

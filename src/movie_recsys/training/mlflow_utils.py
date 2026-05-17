@@ -131,6 +131,18 @@ def log_training_params(config: RetrievalConfig) -> None:
         "augmentation_crop_min_ratio": config.model.augmentation_crop_min_ratio,
         "augmentation_reorder_prob": config.model.augmentation_reorder_prob,
         "augmentation_reorder_window": config.model.augmentation_reorder_window,
+        "use_contrastive_projection_head": str(
+            config.model.use_contrastive_projection_head
+        ).lower(),
+        "contrastive_projection_dim": config.model.contrastive_projection_dim,
+        "contrastive_warmup_epochs": config.model.contrastive_warmup_epochs,
+        "contrastive_decay_start_epoch": (
+            ""
+            if config.model.contrastive_decay_start_epoch is None
+            else config.model.contrastive_decay_start_epoch
+        ),
+        "contrastive_min_weight_scale": config.model.contrastive_min_weight_scale,
+        "lambda_residual_anchor": config.model.lambda_residual_anchor,
     }
     mlflow.log_params(params)
 

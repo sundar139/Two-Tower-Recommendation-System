@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 import torch
 from torch import nn
+from torch.nn import functional
 
 from movie_recsys.constants import PROJECT_ROOT
 from movie_recsys.modeling.artifacts import (
@@ -71,6 +72,7 @@ class TrainingResult:
     final_user_contrastive_loss: float
     final_item_contrastive_loss: float
     final_alignment_contrastive_loss: float
+    final_residual_anchor_loss: float
     final_total_loss: float
 
 
@@ -214,6 +216,63 @@ def _load_partial_state(
         "skipped_missing_keys": skipped_missing,
         "skipped_shape_mismatch_keys": skipped_shape,
     }
+
+
+def _load_strict_state(model: nn.Module, source_checkpoint_path: Path) -> None:
+    source_checkpoint = load_checkpoint(source_checkpoint_path)
+    source_state = source_checkpoint.get("model_state_dict", source_checkpoint)
+    if not isinstance(source_state, dict):
+        msg = f"Checkpoint at {source_checkpoint_path} does not include a state dict"
+        raise ValueError(msg)
+    model.load_state_dict(cast(dict[str, Any], source_state))
+
+
+def _compute_contrastive_weight_scale(
+    config: RetrievalConfig,
+    *,
+    epoch: int,
+) -> float:
+    warmup_epochs = max(int(config.model.contrastive_warmup_epochs), 0)
+    if warmup_epochs > 0:
+        warmup_scale = min(max(float(epoch) / float(warmup_epochs), 0.0), 1.0)
+    else:
+        warmup_scale = 1.0
+
+    scale = warmup_scale
+    decay_start = config.model.contrastive_decay_start_epoch
+    min_scale = min(max(float(config.model.contrastive_min_weight_scale), 0.0), 1.0)
+    if (
+        decay_start is not None
+        and decay_start >= 0
+        and config.train.epochs > 1
+        and epoch >= decay_start
+    ):
+        decay_span = max(config.train.epochs - 1 - decay_start, 1)
+        decay_progress = min(max(float(epoch - decay_start) / float(decay_span), 0.0), 1.0)
+        decay_scale = 1.0 - (decay_progress * (1.0 - min_scale))
+        scale = min(scale, decay_scale)
+
+    return min(max(scale, 0.0), 1.0)
+
+
+def _residual_anchor_loss(
+    *,
+    student_user_emb: torch.Tensor,
+    student_item_emb: torch.Tensor,
+    teacher_user_emb: torch.Tensor,
+    teacher_item_emb: torch.Tensor,
+) -> torch.Tensor:
+    user_anchor = 1.0 - functional.cosine_similarity(
+        student_user_emb,
+        teacher_user_emb,
+        dim=1,
+    ).mean()
+    item_anchor = 1.0 - functional.cosine_similarity(
+        student_item_emb,
+        teacher_item_emb,
+        dim=1,
+    ).mean()
+    return 0.5 * (user_anchor + item_anchor)
 
 
 def _epoch_checkpoint_path(
@@ -371,6 +430,7 @@ def train_retriever(
     applied_init_checkpoint: Path | None = None
     init_from_baseline_applied = False
     init_from_residual_applied = False
+    residual_teacher_checkpoint: Path | None = None
 
     def _resolve_optional_checkpoint(raw_path: Path | None) -> Path | None:
         if raw_path is None:
@@ -419,8 +479,41 @@ def train_retriever(
         applied_init_checkpoint = resolved_ckpt
         init_from_residual_applied = True
 
+    if normalized_model_type == "cl_residual_transformer":
+        default_residual_ckpt = (
+            config.paths.model_output_dir / "best_residual_transformer_retriever.pt"
+        )
+        candidate_teacher_ckpt = (
+            init_from_residual_resolved or config_init_from_residual or default_residual_ckpt
+        )
+        if candidate_teacher_ckpt.exists():
+            residual_teacher_checkpoint = candidate_teacher_ckpt
+
     device = _select_device(config.train.device)
     model.to(device)
+
+    residual_anchor_lambda = float(config.model.lambda_residual_anchor)
+    residual_teacher_model: ResidualTransformerRetriever | None = None
+    if normalized_model_type == "cl_residual_transformer" and residual_anchor_lambda > 0.0:
+        if residual_teacher_checkpoint is None:
+            msg = (
+                "Residual anchor regularization requires a residual checkpoint. "
+                "Set model.init_from_residual or pass --init-from-residual to a valid "
+                "best_residual_transformer_retriever.pt checkpoint."
+            )
+            raise FileNotFoundError(msg)
+        residual_teacher_model = cast(
+            ResidualTransformerRetriever,
+            _build_retriever_model(
+                config,
+                feature_tables,
+                model_type="residual_transformer",
+            ),
+        )
+        _load_strict_state(residual_teacher_model, residual_teacher_checkpoint)
+        residual_teacher_model.to(device)
+        residual_teacher_model.eval()
+        residual_teacher_model.requires_grad_(False)
 
     criterion = InBatchCrossEntropyLoss()
     optimizer = torch.optim.AdamW(
@@ -487,6 +580,7 @@ def train_retriever(
     epoch_user_contrastive_loss = 0.0
     epoch_item_contrastive_loss = 0.0
     epoch_alignment_contrastive_loss = 0.0
+    epoch_residual_anchor_loss = 0.0
     epoch_total_loss = 0.0
 
     active_run: Any | None = None
@@ -537,6 +631,11 @@ def train_retriever(
             "init_from_residual",
             str(init_from_residual_resolved) if init_from_residual_resolved else "",
         )
+        _safe_log_param(
+            "residual_teacher_checkpoint",
+            str(residual_teacher_checkpoint) if residual_teacher_checkpoint else "",
+        )
+        _safe_log_param("lambda_residual_anchor", str(residual_anchor_lambda))
         _safe_log_param("init_checkpoint_path", str(applied_init_checkpoint or ""))
         _safe_log_param("init_from_baseline_applied", str(init_from_baseline_applied).lower())
         _safe_log_param("init_from_residual_applied", str(init_from_residual_applied).lower())
@@ -548,6 +647,20 @@ def train_retriever(
         _safe_log_param(
             "max_runtime_hours",
             "" if max_runtime_hours is None else str(max_runtime_hours),
+        )
+        _safe_log_param(
+            "contrastive_warmup_epochs",
+            str(config.model.contrastive_warmup_epochs),
+        )
+        _safe_log_param(
+            "contrastive_decay_start_epoch",
+            ""
+            if config.model.contrastive_decay_start_epoch is None
+            else str(config.model.contrastive_decay_start_epoch),
+        )
+        _safe_log_param(
+            "contrastive_min_weight_scale",
+            str(config.model.contrastive_min_weight_scale),
         )
         if resume_from is not None:
             mlflow.set_tag("resumed", "true")
@@ -582,11 +695,37 @@ def train_retriever(
 
         for epoch in range(start_epoch, config.train.epochs):
             model.train()
+
+            effective_lambda_user_cl = 0.0
+            effective_lambda_item_cl = 0.0
+            effective_lambda_alignment_cl = 0.0
+            contrastive_weight_scale = 0.0
+            if normalized_model_type == "cl_residual_transformer":
+                contrastive_weight_scale = _compute_contrastive_weight_scale(config, epoch=epoch)
+                effective_lambda_user_cl = (
+                    float(config.model.lambda_user_cl) * contrastive_weight_scale
+                )
+                effective_lambda_item_cl = (
+                    float(config.model.lambda_item_cl) * contrastive_weight_scale
+                )
+                effective_lambda_alignment_cl = (
+                    float(config.model.lambda_alignment_cl) * contrastive_weight_scale
+                )
+                cast(
+                    CLResidualTransformerRetriever,
+                    model,
+                ).set_effective_contrastive_weights(
+                    lambda_user_cl=effective_lambda_user_cl,
+                    lambda_item_cl=effective_lambda_item_cl,
+                    lambda_alignment_cl=effective_lambda_alignment_cl,
+                )
+
             losses: list[float] = []
             retrieval_losses: list[float] = []
             user_cl_losses: list[float] = []
             item_cl_losses: list[float] = []
             alignment_cl_losses: list[float] = []
+            residual_anchor_losses: list[float] = []
             total_losses: list[float] = []
             for batch in train_loader:
                 batch = _to_device(batch, device)
@@ -613,7 +752,27 @@ def train_retriever(
                     if total_loss is None:
                         total_loss = retrieval_loss
 
-                if not torch.isfinite(total_loss):
+                    residual_anchor_loss = torch.zeros_like(retrieval_loss)
+                    if residual_teacher_model is not None and residual_anchor_lambda > 0.0:
+                        with torch.no_grad():
+                            teacher_user_emb = residual_teacher_model.encode_user(batch)
+                            teacher_item_emb = residual_teacher_model.encode_item(batch)
+                        residual_anchor_loss = _residual_anchor_loss(
+                            student_user_emb=output["user_emb"],
+                            student_item_emb=output["item_emb"],
+                            teacher_user_emb=teacher_user_emb,
+                            teacher_item_emb=teacher_item_emb,
+                        )
+                        total_loss = total_loss + (residual_anchor_lambda * residual_anchor_loss)
+
+                if (
+                    not bool(torch.isfinite(retrieval_loss).item())
+                    or not bool(torch.isfinite(user_contrastive_loss).item())
+                    or not bool(torch.isfinite(item_contrastive_loss).item())
+                    or not bool(torch.isfinite(alignment_contrastive_loss).item())
+                    or not bool(torch.isfinite(residual_anchor_loss).item())
+                    or not bool(torch.isfinite(total_loss).item())
+                ):
                     continue
 
                 scaler.scale(total_loss).backward()
@@ -631,6 +790,7 @@ def train_retriever(
                 user_cl_losses.append(float(user_contrastive_loss.item()))
                 item_cl_losses.append(float(item_contrastive_loss.item()))
                 alignment_cl_losses.append(float(alignment_contrastive_loss.item()))
+                residual_anchor_losses.append(float(residual_anchor_loss.item()))
                 total_losses.append(float(total_loss.item()))
 
                 if max_runtime_seconds is not None:
@@ -646,6 +806,9 @@ def train_retriever(
             epoch_alignment_contrastive_loss = (
                 float(np.mean(alignment_cl_losses)) if alignment_cl_losses else 0.0
             )
+            epoch_residual_anchor_loss = (
+                float(np.mean(residual_anchor_losses)) if residual_anchor_losses else 0.0
+            )
             epoch_total_loss = float(np.mean(total_losses)) if total_losses else epoch_loss
 
             log_metrics(
@@ -655,6 +818,11 @@ def train_retriever(
                     "train/user_contrastive_loss": epoch_user_contrastive_loss,
                     "train/item_contrastive_loss": epoch_item_contrastive_loss,
                     "train/alignment_contrastive_loss": epoch_alignment_contrastive_loss,
+                    "train/residual_anchor_loss": epoch_residual_anchor_loss,
+                    "train/contrastive_weight_scale": contrastive_weight_scale,
+                    "train/effective_lambda_user_cl": effective_lambda_user_cl,
+                    "train/effective_lambda_item_cl": effective_lambda_item_cl,
+                    "train/effective_lambda_alignment_cl": effective_lambda_alignment_cl,
                     "train/total_loss": epoch_total_loss,
                 },
                 step=epoch,
@@ -798,6 +966,7 @@ def train_retriever(
             "final_user_contrastive_loss": epoch_user_contrastive_loss,
             "final_item_contrastive_loss": epoch_item_contrastive_loss,
             "final_alignment_contrastive_loss": epoch_alignment_contrastive_loss,
+            "final_residual_anchor_loss": epoch_residual_anchor_loss,
             "final_total_loss": epoch_total_loss,
         }
         report_path = config.paths.report_output_dir / f"train_report_{normalized_model_type}.json"
@@ -836,5 +1005,6 @@ def train_retriever(
         final_user_contrastive_loss=epoch_user_contrastive_loss,
         final_item_contrastive_loss=epoch_item_contrastive_loss,
         final_alignment_contrastive_loss=epoch_alignment_contrastive_loss,
+        final_residual_anchor_loss=epoch_residual_anchor_loss,
         final_total_loss=epoch_total_loss,
     )

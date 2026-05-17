@@ -28,15 +28,19 @@ model:
   sequence_pooling: mean
   initial_transformer_gate: -2.944
   init_from_residual: artifacts/models/best_residual_transformer_retriever.pt
-  contrastive_temperature: 0.1
-  lambda_user_cl: 0.10
+  contrastive_temperature: 0.07
+  lambda_user_cl: 0.05
   lambda_item_cl: 0.02
   lambda_alignment_cl: 0.0
-  augmentation_mask_prob: 0.10
+  augmentation_mask_prob: 0.15
   augmentation_dropout_prob: 0.10
-  augmentation_crop_min_ratio: 0.70
-  augmentation_reorder_prob: 0.10
+  augmentation_crop_min_ratio: 0.60
+  augmentation_reorder_prob: 0.15
   augmentation_reorder_window: 3
+  use_contrastive_projection_head: true
+  contrastive_projection_dim: 128
+  contrastive_warmup_epochs: 2
+  lambda_residual_anchor: 0.01
 
 train:
   random_seed: 42
