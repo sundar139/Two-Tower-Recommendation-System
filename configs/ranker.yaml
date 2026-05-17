@@ -1,1 +1,38 @@
-# Neural ranker configuration placeholder
+model_type: neural_ranker
+retrieval_backbone: residual_transformer
+retriever_config: configs/transformer_retrieval_residual.yaml
+retriever_checkpoint: artifacts/models/best_residual_transformer_retriever.pt
+
+candidate_top_k: 200
+ranker_top_k: 10
+negative_samples_per_positive: 50
+
+batch_size: 1024
+epochs: 8
+learning_rate: 0.0005
+weight_decay: 0.00001
+dropout: 0.10
+hidden_dims: [512, 256, 128]
+
+use_frozen_retrieval_embeddings: true
+embedding_interaction_dim: 128
+
+loss_type: bce
+pairwise_margin: 0.2
+
+amp_enabled: true
+gradient_clip_norm: 1.0
+scheduler: warmup_cosine
+warmup_steps: 200
+random_seed: 42
+
+ranker_candidate_dir: artifacts/ranker/candidates
+ranker_model_dir: artifacts/models
+ranker_report_dir: artifacts/reports
+
+mlflow_tracking_uri: sqlite:///mlflow.db
+mlflow_artifact_root: ./mlruns
+mlflow_experiment_name: movielens-two-tower
+mlflow_ui_host: 127.0.0.1
+mlflow_ui_port: 5000
+mlflow_ui_url: http://127.0.0.1:5000
