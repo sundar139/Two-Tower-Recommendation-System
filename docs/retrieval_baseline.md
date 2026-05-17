@@ -112,8 +112,10 @@ uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 50
 ```
 
 ```powershell
-uv run python scripts/start_mlflow_ui.py
+uv run python scripts/start_mlflow_ui.py --run
 ```
+
+If `uvx mlflow ui` has WinError 10022/worker noise on Windows, use the helper command.
 
 All train/evaluate/export scripts print:
 

@@ -2,9 +2,11 @@
 
 ## Architecture
 
-The project now supports two user-sequence encoders while keeping the same item tower and in-batch retrieval loss.
+The project now supports baseline, transformer, residual transformer, and CL residual transformer
+retrievers while keeping the same item tower and in-batch retrieval objective.
 
 It now also supports a residual transformer variant that starts from baseline behavior and adds gated transformer refinement.
+It also supports CL residual training with user/item contrastive losses on top of the residual model.
 
 ## Baseline Versus Transformer
 
@@ -24,6 +26,15 @@ Residual transformer specific properties:
 - user sequence is blended as `baseline_context + sigmoid(gate) * (transformer_context - baseline_context)`
 - gate is initialized near baseline (`initial_transformer_gate: -2.944`, alpha ~0.05)
 - model can be initialized from a baseline checkpoint (`--init-from-baseline`)
+
+CL residual specific properties:
+
+- model type: `cl_residual_transformer`
+- initialization from residual checkpoint (`--init-from-residual`)
+- user two-view contrastive loss via sequence augmentations
+- item contrastive loss between item-id and item-feature views
+- optional user/item alignment loss
+- total loss: retrieval + weighted auxiliary contrastive terms
 
 ## Transformer Sequence Encoder Details
 
@@ -86,6 +97,19 @@ uv run python scripts/evaluate_retriever.py --config configs/transformer_retriev
 uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split test --sample
 uv run python scripts/compare_retrievers.py --sample
 ```
+
+## Sample CL Residual Transformer
+
+```powershell
+uv run python scripts/run_contrastive_ablation.py --sample
+uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
+uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split test --sample
+uv run python scripts/export_faiss_index.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer
+uv run python scripts/check_contrastive_acceptance.py
+```
+
+Only run full-data CL after sample acceptance passes (`full_data_cl_allowed: true`).
 
 ## Sample Ablation
 
@@ -197,7 +221,6 @@ Key settings:
 
 ## Current Limitations
 
-- no contrastive learning objective yet
 - no neural ranker yet
 - no FastAPI API layer yet
 - no Ollama explanation endpoints yet

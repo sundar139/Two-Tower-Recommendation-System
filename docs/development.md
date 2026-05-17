@@ -65,8 +65,10 @@ uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 50
 or:
 
 ```powershell
-uv run python scripts/start_mlflow_ui.py
+uv run python scripts/start_mlflow_ui.py --run
 ```
+
+If `uvx mlflow ui` raises WinError 10022/worker issues on Windows, use the helper command.
 
 Open:
 

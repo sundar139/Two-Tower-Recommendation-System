@@ -32,9 +32,16 @@ Implemented in Step 3 (transformer retrieval encoder):
 - Baseline-checkpoint initialization flow for residual retriever
 - Residual sample ablation and four-way comparison tooling
 
+Implemented in Step 4 (contrastive residual enhancement):
+
+- CL residual transformer retriever (`cl_residual_transformer`)
+- Sequence augmentations for two-view user contrastive learning
+- Symmetric InfoNCE helpers for user/item/alignment objectives
+- CL training integration with decomposed loss logging
+- Contrastive sample ablation and acceptance checker tooling
+
 Not yet implemented in this step:
 
-- Contrastive learning objective
 - FastAPI serving layer
 - Ollama explanation endpoints
 - Neural ranker
@@ -93,8 +100,10 @@ uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 50
 Or via project helper:
 
 ```powershell
-uv run python scripts/start_mlflow_ui.py
+uv run python scripts/start_mlflow_ui.py --run
 ```
+
+Windows note: if `uvx mlflow ui` emits WinError 10022/worker noise, prefer the helper command above.
 
 UI URL:
 
@@ -133,6 +142,24 @@ uv run python scripts/compare_retrievers.py --sample
 uv run python scripts/export_faiss_index.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer
 ```
 
+## Step 4 Contrastive Commands
+
+```powershell
+uv run python scripts/run_contrastive_ablation.py --sample
+uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
+uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split val --sample
+uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split test --sample
+uv run python scripts/export_faiss_index.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer
+uv run python scripts/compare_retrievers.py --sample --cl-config configs/cl_retrieval.yaml
+uv run python scripts/check_contrastive_acceptance.py
+```
+
+Run full-data CL only after sample acceptance passes:
+
+```powershell
+uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
+```
+
 ## Full Residual Validation Commands
 
 ```powershell
@@ -169,6 +196,8 @@ Latest sample comparison (post-residual recovery):
 Result: pure transformer remains below baseline/popularity, but residual transformer now beats both on sample validation NDCG@10.
 
 CL-EPIDTN contrastive learning remains blocked until full-data residual validation passes acceptance criteria or residual is explicitly marked experimental.
+
+Full-data CL runs remain blocked until `scripts/check_contrastive_acceptance.py` reports `full_data_cl_allowed: true`.
 
 Example MLflow run URLs from residual recovery:
 
