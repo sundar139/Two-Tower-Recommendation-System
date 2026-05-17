@@ -12,6 +12,7 @@ import torch
 import typer
 
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json
+from movie_recsys.modeling.cl_retrieval import CLResidualTransformerRetriever
 from movie_recsys.modeling.datasets import load_feature_tables
 from movie_recsys.modeling.faiss_index import (
     build_flat_ip_index,
@@ -40,7 +41,10 @@ def main(
     config: Path = typer.Option(Path("configs/retrieval.yaml"), "--config"),
     checkpoint: Path | None = typer.Option(None, "--checkpoint"),
     sample: bool = typer.Option(False, "--sample"),
-    model_type: Literal["baseline", "transformer", "residual_transformer"] | None = typer.Option(
+    model_type: Literal[
+        "baseline", "transformer", "residual_transformer", "cl_residual_transformer"
+    ]
+    | None = typer.Option(
         None,
         "--model-type",
     ),
@@ -50,7 +54,9 @@ def main(
     if normalized_model_type == "two_tower":
         normalized_model_type = "baseline"
     cfg.model.model_type = cast(
-        Literal["baseline", "transformer", "residual_transformer"],
+        Literal[
+            "baseline", "transformer", "residual_transformer", "cl_residual_transformer"
+        ],
         normalized_model_type,
     )
     experiment = configure_mlflow(cfg)
@@ -67,6 +73,8 @@ def main(
         model = TransformerRetriever(**common_kwargs)
     elif normalized_model_type == "residual_transformer":
         model = ResidualTransformerRetriever(**common_kwargs)
+    elif normalized_model_type == "cl_residual_transformer":
+        model = CLResidualTransformerRetriever(**common_kwargs)
     else:
         model = BaselineRetriever(**common_kwargs)
 

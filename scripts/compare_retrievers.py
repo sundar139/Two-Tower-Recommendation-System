@@ -10,6 +10,7 @@ import torch
 import typer
 
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json, save_markdown
+from movie_recsys.modeling.cl_retrieval import CLResidualTransformerRetriever
 from movie_recsys.modeling.datasets import load_feature_tables
 from movie_recsys.modeling.evaluator import evaluate_popularity_baseline, evaluate_two_tower
 from movie_recsys.modeling.residual_transformer_retrieval import ResidualTransformerRetriever
@@ -29,7 +30,12 @@ def _split_df(cfg: RetrievalConfig, split: str) -> pl.DataFrame:
 def _build_model(
     cfg: RetrievalConfig,
     tables,
-    model_type: Literal["baseline", "transformer", "residual_transformer"],
+    model_type: Literal[
+        "baseline",
+        "transformer",
+        "residual_transformer",
+        "cl_residual_transformer",
+    ],
 ):
     common_kwargs = {
         "config": cfg,
@@ -42,12 +48,19 @@ def _build_model(
         return TransformerRetriever(**common_kwargs)
     if model_type == "residual_transformer":
         return ResidualTransformerRetriever(**common_kwargs)
+    if model_type == "cl_residual_transformer":
+        return CLResidualTransformerRetriever(**common_kwargs)
     return BaselineRetriever(**common_kwargs)
 
 
 def _evaluate_model(
     cfg: RetrievalConfig,
-    model_type: Literal["baseline", "transformer", "residual_transformer"],
+    model_type: Literal[
+        "baseline",
+        "transformer",
+        "residual_transformer",
+        "cl_residual_transformer",
+    ],
     split: str,
     train_df: pl.DataFrame,
     split_df: pl.DataFrame,
@@ -78,7 +91,13 @@ def _to_markdown(payload: dict[str, dict[str, dict[str, float]]]) -> str:
         lines.append(f"## {split}")
         lines.append("| Model | HR@10 | MRR@10 | NDCG@10 | Recall@50 |")
         lines.append("|---|---:|---:|---:|---:|")
-        for model_name in ["popularity", "baseline", "transformer", "residual_transformer"]:
+        for model_name in [
+            "popularity",
+            "baseline",
+            "transformer",
+            "residual_transformer",
+            "cl_residual_transformer",
+        ]:
             metrics = values[model_name]
             lines.append(
                 f"| {model_name} | {metrics['hr@10']:.6f} | {metrics['mrr@10']:.6f} | "
@@ -99,11 +118,16 @@ def main(
         Path("configs/transformer_retrieval_residual.yaml"),
         "--residual-config",
     ),
+    cl_config: Path = typer.Option(
+        Path("configs/cl_retrieval.yaml"),
+        "--cl-config",
+    ),
     sample: bool = typer.Option(False, "--sample"),
 ) -> None:
     baseline_cfg = load_retrieval_config(baseline_config, sample=sample)
     transformer_cfg = load_retrieval_config(transformer_config, sample=sample)
     residual_cfg = load_retrieval_config(residual_config, sample=sample)
+    cl_cfg = load_retrieval_config(cl_config, sample=sample)
 
     train_df = pl.read_parquet(baseline_cfg.train_path)
     users_df = pl.read_parquet(baseline_cfg.users_path)
@@ -111,6 +135,7 @@ def main(
     baseline_tables = load_feature_tables(baseline_cfg)
     transformer_tables = load_feature_tables(transformer_cfg)
     residual_tables = load_feature_tables(residual_cfg)
+    cl_tables = load_feature_tables(cl_cfg)
 
     payload: dict[str, dict[str, dict[str, float]]] = {}
     for split in ["val", "test"]:
@@ -143,11 +168,21 @@ def main(
             users_df,
             residual_tables,
         )
+        cl_eval = _evaluate_model(
+            cl_cfg,
+            "cl_residual_transformer",
+            split,
+            train_df,
+            split_df,
+            users_df,
+            cl_tables,
+        )
         payload[split] = {
             "popularity": pop_eval.metrics,
             "baseline": base_eval,
             "transformer": tf_eval,
             "residual_transformer": residual_eval,
+            "cl_residual_transformer": cl_eval,
         }
 
     report_name = "retriever_ablation_sample" if sample else "retriever_ablation_full"

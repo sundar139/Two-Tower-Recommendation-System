@@ -12,6 +12,7 @@ import torch
 import typer
 
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json, save_markdown
+from movie_recsys.modeling.cl_retrieval import CLResidualTransformerRetriever
 from movie_recsys.modeling.datasets import load_feature_tables
 from movie_recsys.modeling.evaluator import evaluate_popularity_baseline, evaluate_two_tower
 from movie_recsys.modeling.residual_transformer_retrieval import ResidualTransformerRetriever
@@ -57,6 +58,8 @@ def _normalize_model_name(model: str) -> str:
         return "baseline"
     if model in {"residual_transformer", "residual"}:
         return "residual_transformer"
+    if model in {"cl_residual_transformer", "cl_residual", "cl"}:
+        return "cl_residual_transformer"
     if model in {"transformer", "popularity"}:
         return model
     msg = f"Unsupported model name: {model}"
@@ -79,6 +82,8 @@ def _build_retriever(cfg, tables, normalized_model: str):
         return TransformerRetriever(**common_kwargs)
     if normalized_model == "residual_transformer":
         return ResidualTransformerRetriever(**common_kwargs)
+    if normalized_model == "cl_residual_transformer":
+        return CLResidualTransformerRetriever(**common_kwargs)
     return BaselineRetriever(**common_kwargs)
 
 
@@ -108,7 +113,12 @@ def main(
 ) -> None:
     cfg = load_retrieval_config(config, sample=sample)
     normalized_model = _normalize_model_name(model)
-    if normalized_model in {"baseline", "transformer", "residual_transformer"}:
+    if normalized_model in {
+        "baseline",
+        "transformer",
+        "residual_transformer",
+        "cl_residual_transformer",
+    }:
         cfg.model.model_type = normalized_model  # type: ignore[assignment]
 
     train_df = pl.read_parquet(cfg.train_path)

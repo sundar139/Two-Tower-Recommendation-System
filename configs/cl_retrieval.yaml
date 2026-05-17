@@ -1,0 +1,65 @@
+paths:
+  processed_data_dir: data/processed
+  model_output_dir: artifacts/models
+  index_output_dir: artifacts/faiss
+  report_output_dir: artifacts/reports
+
+files:
+  interactions_train: interactions_train.parquet
+  interactions_val: interactions_val.parquet
+  interactions_test: interactions_test.parquet
+  users: users.parquet
+  items: items.parquet
+  user_id_map: user_id_map.parquet
+  item_id_map: item_id_map.parquet
+
+model:
+  model_type: cl_residual_transformer
+  embedding_dim: 128
+  user_id_embedding_dim: 64
+  item_id_embedding_dim: 64
+  feature_hidden_dim: 128
+  projection_hidden_dim: 256
+  dropout: 0.05
+  temperature: 0.07
+  transformer_layers: 1
+  transformer_heads: 2
+  transformer_ffn_dim: 256
+  sequence_pooling: mean
+  initial_transformer_gate: -2.944
+  init_from_residual: artifacts/models/best_residual_transformer_retriever.pt
+  contrastive_temperature: 0.1
+  lambda_user_cl: 0.10
+  lambda_item_cl: 0.02
+  lambda_alignment_cl: 0.0
+  augmentation_mask_prob: 0.10
+  augmentation_dropout_prob: 0.10
+  augmentation_crop_min_ratio: 0.70
+  augmentation_reorder_prob: 0.10
+  augmentation_reorder_window: 3
+
+train:
+  random_seed: 42
+  device: auto
+  train_batch_size: 256
+  eval_batch_size: 512
+  num_workers: 0
+  history_length: 50
+  learning_rate: 0.0002
+  weight_decay: 0.000001
+  epochs: 8
+  amp_enabled: true
+  scheduler: warmup_cosine
+  scheduler_t_max: 8
+  scheduler_patience: 2
+  scheduler_factor: 0.5
+  min_learning_rate: 0.00001
+  warmup_steps: 200
+  gradient_clip_norm: 1.0
+
+mlflow_tracking_uri: sqlite:///mlflow.db
+mlflow_artifact_root: ./mlruns
+mlflow_experiment_name: movielens-two-tower
+mlflow_ui_host: 127.0.0.1
+mlflow_ui_port: 5000
+mlflow_ui_url: http://127.0.0.1:5000

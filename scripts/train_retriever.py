@@ -17,11 +17,12 @@ app = typer.Typer(add_completion=False)
 def main(
     config: Path = typer.Option(Path("configs/retrieval.yaml"), "--config"),
     sample: bool = typer.Option(False, "--sample"),
-    model_type: Literal["baseline", "transformer", "residual_transformer"] | None = typer.Option(
-        None,
-        "--model-type",
-    ),
+    model_type: Literal[
+        "baseline", "transformer", "residual_transformer", "cl_residual_transformer"
+    ]
+    | None = typer.Option(None, "--model-type"),
     init_from_baseline: Path | None = typer.Option(None, "--init-from-baseline"),
+    init_from_residual: Path | None = typer.Option(None, "--init-from-residual"),
     allow_random_init: bool = typer.Option(False, "--allow-random-init"),
     resume_from: Path | None = typer.Option(None, "--resume-from"),
     checkpoint_every_epoch: bool = typer.Option(False, "--checkpoint-every-epoch"),
@@ -36,6 +37,7 @@ def main(
         sample=sample,
         model_type=model_type,
         init_from_baseline=init_from_baseline,
+        init_from_residual=init_from_residual,
         allow_random_init=allow_random_init,
         resume_from=resume_from,
         checkpoint_every_epoch=checkpoint_every_epoch,
@@ -56,6 +58,13 @@ def main(
     typer.echo(f"last_checkpoint: {result.last_checkpoint}")
     typer.echo(f"resumed_from: {result.resumed_from}")
     typer.echo(f"final_train_loss: {result.final_train_loss:.6f}")
+    typer.echo(f"final_retrieval_loss: {result.final_retrieval_loss:.6f}")
+    typer.echo(f"final_user_contrastive_loss: {result.final_user_contrastive_loss:.6f}")
+    typer.echo(f"final_item_contrastive_loss: {result.final_item_contrastive_loss:.6f}")
+    typer.echo(
+        f"final_alignment_contrastive_loss: {result.final_alignment_contrastive_loss:.6f}"
+    )
+    typer.echo(f"final_total_loss: {result.final_total_loss:.6f}")
     typer.echo(f"mlflow_run_id: {result.mlflow_run_id}")
     typer.echo(f"mlflow_run_url: {result.mlflow_run_url}")
 
