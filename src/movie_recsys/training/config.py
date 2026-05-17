@@ -64,7 +64,9 @@ class DataFilesConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model_type: Literal["baseline", "transformer", "residual_transformer"] = "baseline"
+    model_type: Literal[
+        "baseline", "transformer", "residual_transformer", "cl_residual_transformer"
+    ] = "baseline"
     embedding_dim: int = 128
     user_id_embedding_dim: int = 64
     item_id_embedding_dim: int = 64
@@ -77,6 +79,16 @@ class ModelConfig(BaseModel):
     transformer_ffn_dim: int = 512
     sequence_pooling: Literal["last", "mean"] = "last"
     initial_transformer_gate: float = -2.944
+    init_from_residual: str | None = None
+    contrastive_temperature: float = 0.1
+    lambda_user_cl: float = 0.05
+    lambda_item_cl: float = 0.02
+    lambda_alignment_cl: float = 0.0
+    augmentation_mask_prob: float = 0.10
+    augmentation_dropout_prob: float = 0.10
+    augmentation_crop_min_ratio: float = 0.70
+    augmentation_reorder_prob: float = 0.10
+    augmentation_reorder_window: int = 3
 
 
 class TrainConfig(BaseModel):
@@ -191,6 +203,16 @@ def load_retrieval_config(
             transformer_ffn_dim=model.get("transformer_ffn_dim", 512),
             sequence_pooling=model.get("sequence_pooling", "last"),
             initial_transformer_gate=model.get("initial_transformer_gate", -2.944),
+            init_from_residual=model.get("init_from_residual"),
+            contrastive_temperature=model.get("contrastive_temperature", 0.1),
+            lambda_user_cl=model.get("lambda_user_cl", 0.05),
+            lambda_item_cl=model.get("lambda_item_cl", 0.02),
+            lambda_alignment_cl=model.get("lambda_alignment_cl", 0.0),
+            augmentation_mask_prob=model.get("augmentation_mask_prob", 0.10),
+            augmentation_dropout_prob=model.get("augmentation_dropout_prob", 0.10),
+            augmentation_crop_min_ratio=model.get("augmentation_crop_min_ratio", 0.70),
+            augmentation_reorder_prob=model.get("augmentation_reorder_prob", 0.10),
+            augmentation_reorder_window=model.get("augmentation_reorder_window", 3),
         ),
         train=TrainConfig(
             random_seed=train.get("random_seed", env.RANDOM_SEED),

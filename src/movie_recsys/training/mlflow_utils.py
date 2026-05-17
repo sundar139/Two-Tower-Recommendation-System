@@ -122,6 +122,15 @@ def log_training_params(config: RetrievalConfig) -> None:
             1.0 / (1.0 + math.exp(-config.model.initial_transformer_gate))
         ),
         "attention_type": "scaled_dot_product_attention",
+        "contrastive_temperature": config.model.contrastive_temperature,
+        "lambda_user_cl": config.model.lambda_user_cl,
+        "lambda_item_cl": config.model.lambda_item_cl,
+        "lambda_alignment_cl": config.model.lambda_alignment_cl,
+        "augmentation_mask_prob": config.model.augmentation_mask_prob,
+        "augmentation_dropout_prob": config.model.augmentation_dropout_prob,
+        "augmentation_crop_min_ratio": config.model.augmentation_crop_min_ratio,
+        "augmentation_reorder_prob": config.model.augmentation_reorder_prob,
+        "augmentation_reorder_window": config.model.augmentation_reorder_window,
     }
     mlflow.log_params(params)
 

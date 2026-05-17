@@ -14,12 +14,14 @@ import polars as pl
 import torch
 from torch import nn
 
+from movie_recsys.constants import PROJECT_ROOT
 from movie_recsys.modeling.artifacts import (
     load_checkpoint,
     save_checkpoint,
     save_config_snapshot,
     save_json,
 )
+from movie_recsys.modeling.cl_retrieval import CLResidualTransformerRetriever
 from movie_recsys.modeling.datasets import (
     FeatureTables,
     RetrievalDataset,
@@ -65,6 +67,11 @@ class TrainingResult:
     stopped_due_to_runtime: bool
     last_checkpoint: Path | None
     resumed_from: Path | None
+    final_retrieval_loss: float
+    final_user_contrastive_loss: float
+    final_item_contrastive_loss: float
+    final_alignment_contrastive_loss: float
+    final_total_loss: float
 
 
 def _build_scheduler(
@@ -135,13 +142,15 @@ def _to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
 
 def _normalize_model_type(
     model_type: str,
-) -> Literal["baseline", "transformer", "residual_transformer"]:
+) -> Literal["baseline", "transformer", "residual_transformer", "cl_residual_transformer"]:
     if model_type in {"two_tower", "baseline"}:
         return "baseline"
     if model_type == "transformer":
         return "transformer"
     if model_type == "residual_transformer":
         return "residual_transformer"
+    if model_type == "cl_residual_transformer":
+        return "cl_residual_transformer"
     msg = f"Unsupported model type: {model_type}"
     raise ValueError(msg)
 
@@ -149,7 +158,12 @@ def _normalize_model_type(
 def _build_retriever_model(
     config: RetrievalConfig,
     feature_tables: FeatureTables,
-    model_type: Literal["baseline", "transformer", "residual_transformer"],
+    model_type: Literal[
+        "baseline",
+        "transformer",
+        "residual_transformer",
+        "cl_residual_transformer",
+    ],
 ) -> nn.Module:
     common_kwargs = {
         "config": config,
@@ -162,6 +176,8 @@ def _build_retriever_model(
         return TransformerRetriever(**common_kwargs)
     if model_type == "residual_transformer":
         return ResidualTransformerRetriever(**common_kwargs)
+    if model_type == "cl_residual_transformer":
+        return CLResidualTransformerRetriever(**common_kwargs)
     return BaselineRetriever(**common_kwargs)
 
 
@@ -316,6 +332,7 @@ def train_retriever(
     sample: bool,
     model_type: str | None = None,
     init_from_baseline: Path | None = None,
+    init_from_residual: Path | None = None,
     allow_random_init: bool = False,
     resume_from: Path | None = None,
     checkpoint_every_epoch: bool = False,
@@ -350,9 +367,31 @@ def train_retriever(
         model_type=normalized_model_type,
     )
 
-    baseline_init_summary: dict[str, int] | None = None
+    init_summary: dict[str, int] | None = None
+    applied_init_checkpoint: Path | None = None
+    init_from_baseline_applied = False
+    init_from_residual_applied = False
+
+    def _resolve_optional_checkpoint(raw_path: Path | None) -> Path | None:
+        if raw_path is None:
+            return None
+        if raw_path.is_absolute():
+            return raw_path
+        return (PROJECT_ROOT / raw_path).resolve()
+
+    init_from_residual_resolved = _resolve_optional_checkpoint(init_from_residual)
+    config_init_from_residual = _resolve_optional_checkpoint(
+        Path(config.model.init_from_residual) if config.model.init_from_residual else None
+    )
+
     if init_from_baseline is not None:
-        baseline_init_summary = _load_partial_state(model, init_from_baseline)
+        init_summary = _load_partial_state(model, init_from_baseline)
+        applied_init_checkpoint = init_from_baseline
+        init_from_baseline_applied = True
+    elif init_from_residual_resolved is not None:
+        init_summary = _load_partial_state(model, init_from_residual_resolved)
+        applied_init_checkpoint = init_from_residual_resolved
+        init_from_residual_applied = True
     elif normalized_model_type == "residual_transformer" and not allow_random_init:
         default_baseline_ckpt = config.paths.model_output_dir / "best_baseline_retriever.pt"
         if not default_baseline_ckpt.exists():
@@ -361,7 +400,24 @@ def train_retriever(
                 "Pass --init-from-baseline or use --allow-random-init."
             )
             raise FileNotFoundError(msg)
-        baseline_init_summary = _load_partial_state(model, default_baseline_ckpt)
+        init_summary = _load_partial_state(model, default_baseline_ckpt)
+        applied_init_checkpoint = default_baseline_ckpt
+        init_from_baseline_applied = True
+    elif normalized_model_type == "cl_residual_transformer" and not allow_random_init:
+        default_residual_ckpt = (
+            config.paths.model_output_dir / "best_residual_transformer_retriever.pt"
+        )
+        resolved_ckpt = config_init_from_residual or default_residual_ckpt
+        if not resolved_ckpt.exists():
+            msg = (
+                "CL residual transformer requires residual initialization. "
+                "Pass --init-from-residual, set model.init_from_residual, "
+                "or use --allow-random-init."
+            )
+            raise FileNotFoundError(msg)
+        init_summary = _load_partial_state(model, resolved_ckpt)
+        applied_init_checkpoint = resolved_ckpt
+        init_from_residual_applied = True
 
     device = _select_device(config.train.device)
     model.to(device)
@@ -427,6 +483,11 @@ def train_retriever(
     last_checkpoint: Path | None = None
     completed_epochs = start_epoch
     epoch_loss = 0.0
+    epoch_retrieval_loss = 0.0
+    epoch_user_contrastive_loss = 0.0
+    epoch_item_contrastive_loss = 0.0
+    epoch_alignment_contrastive_loss = 0.0
+    epoch_total_loss = 0.0
 
     active_run: Any | None = None
     resumed_existing_run = False
@@ -472,6 +533,13 @@ def train_retriever(
             "init_from_baseline",
             str(init_from_baseline) if init_from_baseline else "",
         )
+        _safe_log_param(
+            "init_from_residual",
+            str(init_from_residual_resolved) if init_from_residual_resolved else "",
+        )
+        _safe_log_param("init_checkpoint_path", str(applied_init_checkpoint or ""))
+        _safe_log_param("init_from_baseline_applied", str(init_from_baseline_applied).lower())
+        _safe_log_param("init_from_residual_applied", str(init_from_residual_applied).lower())
         _safe_log_param("allow_random_init", str(allow_random_init).lower())
         _safe_log_param("checkpoint_every_epoch", str(checkpoint_every_epoch).lower())
         _safe_log_param("eval_every_epoch", str(eval_every_epoch).lower())
@@ -490,34 +558,65 @@ def train_retriever(
                 mlflow.set_tag("resume_mode", "new_run")
                 if resumed_mlflow_run_id:
                     mlflow.set_tag("resumed_from_run_id", resumed_mlflow_run_id)
-        if baseline_init_summary is not None:
+        if init_summary is not None:
             _safe_log_param(
                 "baseline_init_loaded_keys",
-                str(baseline_init_summary["loaded_keys"]),
+                str(init_summary["loaded_keys"]),
             )
             _safe_log_param(
                 "baseline_init_skipped_missing_keys",
-                str(baseline_init_summary["skipped_missing_keys"]),
+                str(init_summary["skipped_missing_keys"]),
             )
             _safe_log_param(
                 "baseline_init_skipped_shape_mismatch_keys",
-                str(baseline_init_summary["skipped_shape_mismatch_keys"]),
+                str(init_summary["skipped_shape_mismatch_keys"]),
+            )
+            _safe_log_param("loaded_key_count", str(init_summary["loaded_keys"]))
+            _safe_log_param(
+                "skipped_key_count",
+                str(
+                    init_summary["skipped_missing_keys"]
+                    + init_summary["skipped_shape_mismatch_keys"]
+                ),
             )
 
         for epoch in range(start_epoch, config.train.epochs):
             model.train()
             losses: list[float] = []
+            retrieval_losses: list[float] = []
+            user_cl_losses: list[float] = []
+            item_cl_losses: list[float] = []
+            alignment_cl_losses: list[float] = []
+            total_losses: list[float] = []
             for batch in train_loader:
                 batch = _to_device(batch, device)
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=device.type, enabled=amp_enabled):
                     output = model(batch)
-                    loss = criterion(output["logits"])
+                    retrieval_loss = output.get("retrieval_loss")
+                    if retrieval_loss is None:
+                        retrieval_loss = criterion(output["logits"])
 
-                if not torch.isfinite(loss):
+                    user_contrastive_loss = output.get("user_contrastive_loss")
+                    if user_contrastive_loss is None:
+                        user_contrastive_loss = torch.zeros_like(retrieval_loss)
+
+                    item_contrastive_loss = output.get("item_contrastive_loss")
+                    if item_contrastive_loss is None:
+                        item_contrastive_loss = torch.zeros_like(retrieval_loss)
+
+                    alignment_contrastive_loss = output.get("alignment_contrastive_loss")
+                    if alignment_contrastive_loss is None:
+                        alignment_contrastive_loss = torch.zeros_like(retrieval_loss)
+
+                    total_loss = output.get("total_loss")
+                    if total_loss is None:
+                        total_loss = retrieval_loss
+
+                if not torch.isfinite(total_loss):
                     continue
 
-                scaler.scale(loss).backward()
+                scaler.scale(total_loss).backward()
                 scaler.unscale_(optimizer)
                 clip_norm = config.train.gradient_clip_norm
                 if clip_norm <= 0.0:
@@ -527,7 +626,12 @@ def train_retriever(
                 scaler.update()
                 if scheduler is not None and scheduler_step_per_batch:
                     scheduler.step()
-                losses.append(float(loss.item()))
+                losses.append(float(total_loss.item()))
+                retrieval_losses.append(float(retrieval_loss.item()))
+                user_cl_losses.append(float(user_contrastive_loss.item()))
+                item_cl_losses.append(float(item_contrastive_loss.item()))
+                alignment_cl_losses.append(float(alignment_contrastive_loss.item()))
+                total_losses.append(float(total_loss.item()))
 
                 if max_runtime_seconds is not None:
                     elapsed_seconds = monotonic() - run_start_time
@@ -536,7 +640,25 @@ def train_retriever(
                         break
 
             epoch_loss = float(np.mean(losses)) if losses else 0.0
-            log_metrics({"train_loss": epoch_loss}, step=epoch)
+            epoch_retrieval_loss = float(np.mean(retrieval_losses)) if retrieval_losses else 0.0
+            epoch_user_contrastive_loss = float(np.mean(user_cl_losses)) if user_cl_losses else 0.0
+            epoch_item_contrastive_loss = float(np.mean(item_cl_losses)) if item_cl_losses else 0.0
+            epoch_alignment_contrastive_loss = (
+                float(np.mean(alignment_cl_losses)) if alignment_cl_losses else 0.0
+            )
+            epoch_total_loss = float(np.mean(total_losses)) if total_losses else epoch_loss
+
+            log_metrics(
+                {
+                    "train_loss": epoch_total_loss,
+                    "train/retrieval_loss": epoch_retrieval_loss,
+                    "train/user_contrastive_loss": epoch_user_contrastive_loss,
+                    "train/item_contrastive_loss": epoch_item_contrastive_loss,
+                    "train/alignment_contrastive_loss": epoch_alignment_contrastive_loss,
+                    "train/total_loss": epoch_total_loss,
+                },
+                step=epoch,
+            )
 
             eval_result = None
             if eval_every_epoch and not stopped_due_to_runtime:
@@ -657,11 +779,26 @@ def train_retriever(
             "sample": sample,
             "device": str(device),
             "scheduler": config.train.scheduler,
+            "init_checkpoint_path": str(applied_init_checkpoint or ""),
+            "init_from_baseline": init_from_baseline_applied,
+            "init_from_residual": init_from_residual_applied,
+            "loaded_key_count": 0 if init_summary is None else init_summary["loaded_keys"],
+            "skipped_key_count": (
+                0
+                if init_summary is None
+                else init_summary["skipped_missing_keys"]
+                + init_summary["skipped_shape_mismatch_keys"]
+            ),
             "best_epoch": best_epoch,
             "start_epoch": start_epoch,
             "completed_epochs": completed_epochs,
             "stopped_due_to_runtime": stopped_due_to_runtime,
             "last_checkpoint": str(last_checkpoint) if last_checkpoint else "",
+            "final_retrieval_loss": epoch_retrieval_loss,
+            "final_user_contrastive_loss": epoch_user_contrastive_loss,
+            "final_item_contrastive_loss": epoch_item_contrastive_loss,
+            "final_alignment_contrastive_loss": epoch_alignment_contrastive_loss,
+            "final_total_loss": epoch_total_loss,
         }
         report_path = config.paths.report_output_dir / f"train_report_{normalized_model_type}.json"
         save_json(report_path, report_payload)
@@ -684,7 +821,7 @@ def train_retriever(
     return TrainingResult(
         best_checkpoint=best_checkpoint,
         best_metrics=best_metrics,
-        final_train_loss=epoch_loss,
+        final_train_loss=epoch_total_loss,
         model_type=normalized_model_type,
         mlflow_run_id=run_summary["mlflow_run_id"],
         mlflow_run_url=run_summary["mlflow_run_url"],
@@ -695,4 +832,9 @@ def train_retriever(
         stopped_due_to_runtime=stopped_due_to_runtime,
         last_checkpoint=last_checkpoint,
         resumed_from=resume_from,
+        final_retrieval_loss=epoch_retrieval_loss,
+        final_user_contrastive_loss=epoch_user_contrastive_loss,
+        final_item_contrastive_loss=epoch_item_contrastive_loss,
+        final_alignment_contrastive_loss=epoch_alignment_contrastive_loss,
+        final_total_loss=epoch_total_loss,
     )
