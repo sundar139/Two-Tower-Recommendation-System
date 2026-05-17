@@ -337,6 +337,7 @@ def main(
             "epochs": int(trial["epochs"]),
             "scheduler": str(trial["scheduler"]),
             "warmup_steps": int(trial["warmup_steps"]),
+            "gradient_clip_norm": float(trial["gradient_clip_norm"]),
             "final_train_loss": float(train_result.final_train_loss),
             "final_retrieval_loss": float(train_result.final_retrieval_loss),
             "final_user_contrastive_loss": float(train_result.final_user_contrastive_loss),
@@ -362,10 +363,11 @@ def main(
         raise RuntimeError("No contrastive trial succeeded")
 
     best_trial = trial_results[best_idx]
+    best_trial_spec = trials[best_idx]
     best_checkpoint = Path(best_trial["best_checkpoint"])
     best_trial_cfg = _apply_trial_to_config(
         contrastive_cfg,
-        best_trial,
+        best_trial_spec,
         residual_checkpoint=residual_ckpt,
     )
 
