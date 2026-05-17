@@ -390,7 +390,11 @@ def validate_candidate_frame(
 		frame.select(
 			(
 				pl.col("query_id")
-				== pl.format("{}_u{:08}", pl.col("split"), pl.col("user_idx"))
+				== (
+					pl.col("split")
+					+ pl.lit("_u")
+					+ pl.col("user_idx").cast(pl.Utf8).str.zfill(8)
+				)
 			).all()
 		)
 		.item()
