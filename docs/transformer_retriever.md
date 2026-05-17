@@ -227,10 +227,9 @@ Key settings:
 - sample acceptance result: `full_data_cl_allowed: false`
 - CL remains experimental
 - residual transformer remains the production retrieval backbone
-- ranker work should continue with residual-transformer artifacts
+- neural ranker work should continue with residual-transformer artifacts
 
 ## Current Limitations
 
-- no neural ranker yet
 - no FastAPI API layer yet
 - no Ollama explanation endpoints yet

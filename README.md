@@ -40,11 +40,19 @@ Implemented in Step 4 (contrastive residual enhancement):
 - CL training integration with decomposed loss logging
 - Contrastive sample ablation and acceptance checker tooling
 
+Implemented in Step 5 (neural re-ranker):
+
+- Residual top-200 candidate generation for train/val/test ranker queries
+- Deterministic candidate validation and metadata signature logging
+- Ranker feature engineering over retrieval/user/item/interaction signals
+- MLP neural ranker with BCE/BPR/hybrid loss support
+- Ranker train/eval scripts with MLflow logging and checkpointing
+- Ranker-vs-residual comparison and acceptance checker tooling
+
 Not yet implemented in this step:
 
 - FastAPI serving layer
 - Ollama explanation endpoints
-- Neural ranker
 
 ## Dataset Note
 
@@ -160,6 +168,30 @@ Run full-data CL only after sample acceptance passes:
 uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
 ```
 
+## Step 5 Neural Ranker Commands
+
+Sample workflow:
+
+```powershell
+uv run python scripts/generate_ranker_candidates.py --sample
+uv run python scripts/train_ranker.py --sample
+uv run python scripts/evaluate_ranker.py --sample --split val
+uv run python scripts/evaluate_ranker.py --sample --split test
+uv run python scripts/compare_retrieval_ranker.py --sample
+uv run python scripts/check_ranker_acceptance.py --sample
+```
+
+Run full-data ranker only after sample acceptance passes:
+
+```powershell
+uv run python scripts/generate_ranker_candidates.py
+uv run python scripts/train_ranker.py
+uv run python scripts/evaluate_ranker.py --split val
+uv run python scripts/evaluate_ranker.py --split test
+uv run python scripts/compare_retrieval_ranker.py
+uv run python scripts/check_ranker_acceptance.py
+```
+
 ## Full Residual Validation Commands
 
 ```powershell
@@ -209,7 +241,7 @@ Decision:
 - CL remains experimental.
 - Residual transformer remains the production retrieval backbone.
 - Full-data CL is blocked until a future sample acceptance run passes.
-- Ranker work should continue using residual-transformer retrieval artifacts.
+- Neural ranker work should continue using residual-transformer retrieval artifacts.
 
 ## Step 2 Validation Commands
 
@@ -295,6 +327,5 @@ Do not commit generated data or experiment artifacts:
 Transformer limitations currently in scope:
 
 - no contrastive learning yet
-- no neural ranker yet
 - no FastAPI endpoints yet
 - no Ollama explanation endpoints yet

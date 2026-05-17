@@ -105,4 +105,4 @@ Current policy:
 - CL remains experimental.
 - Residual transformer remains the production retrieval backbone.
 - Full-data CL is blocked until a future sample run passes acceptance.
-- Downstream ranker experiments should consume residual-transformer retrieval artifacts.
+- Neural ranker workflows should consume residual-transformer retrieval artifacts.

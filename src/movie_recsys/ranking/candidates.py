@@ -155,10 +155,30 @@ def _build_model(
 		user_feature_dim=tables.user_features.shape[1],
 		item_feature_dim=tables.item_features.shape[1],
 	)
-	checkpoint = load_checkpoint(ranker_cfg.retriever_checkpoint)
-	model.load_state_dict(checkpoint["model_state_dict"])
-	model.eval()
-	return model
+	candidate_checkpoints = [
+		ranker_cfg.retriever_checkpoint,
+		retrieval_cfg.paths.model_output_dir / "last_residual_transformer_retriever.pt",
+		retrieval_cfg.paths.model_output_dir / "best_residual_transformer_retriever.pt",
+	]
+
+	seen: set[Path] = set()
+	errors: list[str] = []
+	for checkpoint_path in candidate_checkpoints:
+		if checkpoint_path in seen or not checkpoint_path.exists():
+			continue
+		seen.add(checkpoint_path)
+		checkpoint = load_checkpoint(checkpoint_path)
+		try:
+			model.load_state_dict(checkpoint["model_state_dict"])
+			model.eval()
+			return model
+		except RuntimeError as exc:
+			errors.append(f"{checkpoint_path}: {exc}")
+
+	msg = "Failed to load residual retriever checkpoint for candidate generation"
+	if errors:
+		msg = f"{msg}. Tried checkpoints with mismatched shapes: {' | '.join(errors)}"
+	raise RuntimeError(msg)
 
 
 def _encode_items(
@@ -352,7 +372,7 @@ def validate_candidate_frame(
 	frame: pl.DataFrame,
 	*,
 	split: str,
-	leaked_targets: set[int] | None = None,
+	leaked_targets: set[int] | set[tuple[int, int]] | None = None,
 ) -> dict[str, bool]:
 	if frame.height == 0:
 		msg = f"Candidate frame for split '{split}' is empty"
@@ -402,10 +422,34 @@ def validate_candidate_frame(
 
 	no_leakage = True
 	if leaked_targets is not None:
-		train_targets = set(
-			frame.filter(pl.col("label") == 1).get_column("target_item_idx").to_list()
-		)
-		no_leakage = len(train_targets.intersection(leaked_targets)) == 0
+		train_positive = frame.filter(pl.col("label") == 1)
+		if leaked_targets and all(
+			isinstance(value, tuple) and len(value) == 2 for value in leaked_targets
+		):
+			pair_targets = cast(set[tuple[int, int]], leaked_targets)
+			train_pairs = {
+				(int(user_idx), int(item_idx))
+				for user_idx, item_idx in train_positive.select(
+					["user_idx", "target_item_idx"]
+				).iter_rows()
+			}
+			heldout_pairs = {
+				(int(user_idx), int(item_idx))
+				for user_idx, item_idx in pair_targets
+				if isinstance(user_idx, int) and isinstance(item_idx, int)
+			}
+			no_leakage = len(train_pairs.intersection(heldout_pairs)) == 0
+		else:
+			train_targets = {
+				int(item_idx)
+				for item_idx in train_positive.get_column("target_item_idx").to_list()
+			}
+			heldout_targets = {
+				int(item_idx)
+				for item_idx in leaked_targets
+				if isinstance(item_idx, int)
+			}
+			no_leakage = len(train_targets.intersection(heldout_targets)) == 0
 
 	checks = {
 		"one_positive_per_query": bool(one_positive),
@@ -468,8 +512,14 @@ def generate_ranker_candidates(
 		history_length=retrieval_cfg.train.history_length,
 	)
 
-	val_targets = set(val_df.get_column("item_idx").to_list())
-	test_targets = set(test_df.get_column("item_idx").to_list())
+	val_targets = {
+		(int(user_idx), int(item_idx))
+		for user_idx, item_idx in val_df.select(["user_idx", "item_idx"]).iter_rows()
+	}
+	test_targets = {
+		(int(user_idx), int(item_idx))
+		for user_idx, item_idx in test_df.select(["user_idx", "item_idx"]).iter_rows()
+	}
 
 	train_frame = _build_candidate_frame(
 		train_queries,

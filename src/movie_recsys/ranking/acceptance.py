@@ -74,13 +74,26 @@ def guard_no_candidate_leakage(
 	val_frame = pl.read_parquet(val_candidates)
 	test_frame = pl.read_parquet(test_candidates)
 
-	train_targets = set(
-		train_frame.filter(pl.col("label") == 1).get_column("target_item_idx").to_list()
+	train_pairs = {
+		(int(user_idx), int(item_idx))
+		for user_idx, item_idx in train_frame.filter(pl.col("label") == 1)
+		.select(["user_idx", "target_item_idx"])
+		.iter_rows()
+	}
+	heldout_pairs = {
+		(int(user_idx), int(item_idx))
+		for user_idx, item_idx in val_frame.filter(pl.col("label") == 1)
+		.select(["user_idx", "target_item_idx"])
+		.iter_rows()
+	}.union(
+		{
+			(int(user_idx), int(item_idx))
+			for user_idx, item_idx in test_frame.filter(pl.col("label") == 1)
+			.select(["user_idx", "target_item_idx"])
+			.iter_rows()
+		}
 	)
-	heldout_targets = set(val_frame.get_column("target_item_idx").to_list()).union(
-		set(test_frame.get_column("target_item_idx").to_list())
-	)
-	return len(train_targets.intersection(heldout_targets)) == 0
+	return len(train_pairs.intersection(heldout_pairs)) == 0
 
 
 def guard_finite_scores(scored_candidates_path: Path) -> bool:
