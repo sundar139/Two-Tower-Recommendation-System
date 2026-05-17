@@ -116,15 +116,14 @@ def apply_sequence_augmentations(
         if target_item_idx is not None:
             valid_tokens = valid_tokens[valid_tokens != target_item_idx[row_idx]]
 
-        # Avoid all-empty augmentations unless the source history was empty.
+        # Avoid all-empty augmentations unless filtering to prevent leakage makes it unavoidable.
         if valid_tokens.numel() == 0 and original_tokens.numel() > 0:
-            fallback = original_tokens[-1:]
-            if target_item_idx is not None and fallback[0] == target_item_idx[row_idx]:
-                valid_tokens = original_tokens[original_tokens != target_item_idx[row_idx]]
-                if valid_tokens.numel() == 0:
-                    valid_tokens = fallback
+            if target_item_idx is not None:
+                non_target_tokens = original_tokens[original_tokens != target_item_idx[row_idx]]
+                if non_target_tokens.numel() > 0:
+                    valid_tokens = non_target_tokens[-1:]
             else:
-                valid_tokens = fallback
+                valid_tokens = original_tokens[-1:]
 
         packed, packed_mask = _pack_tokens(
             valid_tokens,

@@ -54,6 +54,26 @@ def test_target_item_excluded_when_present() -> None:
     assert int(target.item()) not in aug_history[aug_mask].tolist()
 
 
+def test_target_only_history_does_not_reintroduce_target() -> None:
+    history = torch.tensor([[0, 0, 0, 0, 4]], dtype=torch.long)
+    mask = history > 0
+    target = torch.tensor([4], dtype=torch.long)
+
+    aug_history, aug_mask = apply_sequence_augmentations(
+        history,
+        mask,
+        target_item_idx=target,
+        mask_prob=0.0,
+        dropout_prob=0.0,
+        crop_min_ratio=1.0,
+        reorder_prob=0.0,
+        reorder_window=2,
+    )
+
+    assert not bool(aug_mask.any())
+    assert torch.equal(aug_history, torch.zeros_like(aug_history))
+
+
 def test_non_empty_history_does_not_collapse_to_empty() -> None:
     torch.manual_seed(42)
     history = torch.tensor(
