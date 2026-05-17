@@ -106,7 +106,7 @@ uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --sa
 uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split val --sample
 uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split test --sample
 uv run python scripts/export_faiss_index.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer
-uv run python scripts/check_contrastive_acceptance.py
+uv run python scripts/check_contrastive_acceptance.py --summary artifacts/reports/contrastive_ablation_sample.json --sample
 ```
 
 Only run full-data CL after sample acceptance passes (`full_data_cl_allowed: true`).
@@ -153,7 +153,7 @@ Acceptance checker:
 uv run python scripts/check_residual_acceptance.py --summary artifacts/reports/full_residual_transformer_summary.json
 ```
 
-CL-EPIDTN remains blocked until residual full-data acceptance passes, or residual is explicitly treated as experimental.
+CL-EPIDTN remains blocked until `scripts/check_contrastive_acceptance.py` reports `full_data_cl_allowed: true`.
 
 ## Failure Analysis (Current)
 
@@ -218,6 +218,16 @@ Key settings:
 | test | baseline | - | - | - | - |
 | test | transformer | - | - | - | - |
 | test | residual_transformer | - | - | - | - |
+
+## Contrastive Decision Snapshot
+
+- first CL attempt was not promoted
+- second focused CL sweep best trial: `focused_proj_warm_anchor_u050_i020_t007_a001`
+- sample acceptance result: `acceptance_passed: false`
+- sample acceptance result: `full_data_cl_allowed: false`
+- CL remains experimental
+- residual transformer remains the production retrieval backbone
+- ranker work should continue with residual-transformer artifacts
 
 ## Current Limitations
 

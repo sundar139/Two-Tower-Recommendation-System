@@ -151,7 +151,7 @@ uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml -
 uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split test --sample
 uv run python scripts/export_faiss_index.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer
 uv run python scripts/compare_retrievers.py --sample --cl-config configs/cl_retrieval.yaml
-uv run python scripts/check_contrastive_acceptance.py
+uv run python scripts/check_contrastive_acceptance.py --summary artifacts/reports/contrastive_ablation_sample.json --sample
 ```
 
 Run full-data CL only after sample acceptance passes:
@@ -184,27 +184,32 @@ Acceptance checker:
 uv run python scripts/check_residual_acceptance.py --summary artifacts/reports/full_residual_transformer_summary.json
 ```
 
-## Transformer Stabilization Status
+## Contrastive Stabilization Status
 
-Latest sample comparison (post-residual recovery):
+First CL attempt outcome:
 
+- The initial broad CL attempt did not produce a stable promotion decision and was superseded by a focused second-round matrix with stricter acceptance checks.
+
+Second focused CL sample ablation (latest):
+
+- best trial: `focused_proj_warm_anchor_u050_i020_t007_a001`
+- best trial val NDCG@10: `0.023174`
 - popularity val NDCG@10: `0.024347`
-- baseline val NDCG@10: `0.022808`
-- stable transformer val NDCG@10: `0.016133`
-- residual transformer val NDCG@10: `0.026668`
+- residual val NDCG@10: `0.020215`
 
-Result: pure transformer remains below baseline/popularity, but residual transformer now beats both on sample validation NDCG@10.
+Acceptance result from `scripts/check_contrastive_acceptance.py --summary artifacts/reports/contrastive_ablation_sample.json --sample`:
 
-CL-EPIDTN contrastive learning remains blocked until full-data residual validation passes acceptance criteria or residual is explicitly marked experimental.
+- `acceptance_passed: false`
+- `full_data_cl_allowed: false`
+- failure reason: no primary acceptance rule passed
+- guard checks: FAISS parity, recall collapse guard, and finite-loss checks all passed
 
-Full-data CL runs remain blocked until `scripts/check_contrastive_acceptance.py` reports `full_data_cl_allowed: true`.
+Decision:
 
-Example MLflow run URLs from residual recovery:
-
-- baseline sample train: `http://127.0.0.1:5000/#/experiments/1/runs/300602b1ac22462d957c9ab180df903c`
-- stable transformer sample train: `http://127.0.0.1:5000/#/experiments/1/runs/181a2151033041d4aa4ec54d1d1c15bc`
-- residual sample train (baseline-init): `http://127.0.0.1:5000/#/experiments/1/runs/d753cc7d2cfd477786284ae464cde99c`
-- best residual ablation trial: `http://127.0.0.1:5000/#/experiments/1/runs/a23e7bfa2e4b4273abad6acbd7925109`
+- CL remains experimental.
+- Residual transformer remains the production retrieval backbone.
+- Full-data CL is blocked until a future sample acceptance run passes.
+- Ranker work should continue using residual-transformer retrieval artifacts.
 
 ## Step 2 Validation Commands
 
