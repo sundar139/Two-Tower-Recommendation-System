@@ -385,6 +385,7 @@ def train_ranker(
 	)
 
 	device = _select_device()
+	amp_enabled = bool(cfg.amp_enabled and device.type == "cuda" and sample)
 	model = NeuralRanker(
 		input_dim=feature_count,
 		hidden_dims=cfg.hidden_dims,
@@ -414,7 +415,7 @@ def train_ranker(
 		steps_per_epoch=max(estimated_steps, 1),
 	)
 
-	scaler = torch.amp.GradScaler(enabled=cfg.amp_enabled and device.type == "cuda")
+	scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
 	mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
 	mlflow.set_experiment(cfg.mlflow_experiment_name)
@@ -486,6 +487,7 @@ def train_ranker(
 				"scheduler": cfg.scheduler,
 				"warmup_steps": cfg.warmup_steps,
 				"amp_enabled": cfg.amp_enabled,
+				"amp_effective": amp_enabled,
 				"feature_count": feature_count,
 				"train_candidate_count": train_row_count,
 				"val_candidate_count": val_row_count,
@@ -513,6 +515,7 @@ def train_ranker(
 			model.train()
 			epoch_losses: list[float] = []
 			rows_processed_epoch = 0
+			non_finite_batches = 0
 			epoch_start = monotonic()
 
 			for batch_index, batch in enumerate(
@@ -538,7 +541,7 @@ def train_ranker(
 				optimizer.zero_grad(set_to_none=True)
 				with torch.autocast(
 					device_type=device.type,
-					enabled=cfg.amp_enabled and device.type == "cuda",
+					enabled=amp_enabled,
 				):
 					logits = model(features)
 					loss = compute_loss(
@@ -548,6 +551,19 @@ def train_ranker(
 						query_ids=query_ids,
 						pairwise_margin=cfg.pairwise_margin,
 					)
+
+				loss_value = float(loss.detach().cpu().item())
+				if not math.isfinite(loss_value):
+					non_finite_batches += 1
+					LOGGER.warning(
+						"[ranker-train]"
+						f" split=train"
+						f" epoch={epoch + 1}/{effective_epochs}"
+						f" batch={batch_index}"
+						" loss=non-finite"
+						" action=skip_batch"
+					)
+					continue
 
 				optimizer_stepped = False
 				if scaler.is_enabled():
@@ -567,7 +583,7 @@ def train_ranker(
 				if scheduler is not None and step_per_batch and optimizer_stepped:
 					scheduler.step()
 
-				epoch_losses.append(float(loss.detach().cpu().item()))
+				epoch_losses.append(loss_value)
 
 				if batch_index % max(cfg.log_every_batches, 1) == 0:
 					status = log_memory_status(
@@ -598,6 +614,13 @@ def train_ranker(
 				break
 
 			train_loss_value = float(sum(epoch_losses) / max(len(epoch_losses), 1))
+			if non_finite_batches > 0:
+				LOGGER.warning(
+					"[ranker-train]"
+					f" split=train"
+					f" epoch={epoch + 1}/{effective_epochs}"
+					f" non_finite_batches={non_finite_batches}"
+				)
 			val_metrics = best_metrics
 			if eval_every_epoch or full_smoke:
 				val_metrics, evaluated_queries = _evaluate_streaming(
