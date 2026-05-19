@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 import torch
 
 from movie_recsys.modeling.artifacts import load_checkpoint, save_json, save_markdown
-from movie_recsys.modeling.metrics import aggregate_ranking_metrics
-from movie_recsys.ranking.dataset import infer_feature_columns
+from movie_recsys.modeling.metrics import hit_rate_at_k, mrr_at_k, ndcg_at_k, recall_at_k
+from movie_recsys.ranking.dataset import iter_ranker_query_groups
 from movie_recsys.ranking.model import NeuralRanker
+from movie_recsys.utils.system import log_memory_status
 
 
 @dataclass(slots=True)
@@ -22,6 +25,8 @@ class RankerEvaluationResult:
 	ranker_metrics: dict[str, float]
 	residual_metrics: dict[str, float]
 	popularity_metrics: dict[str, float] | None
+	query_count: int
+	row_count: int
 	report_path: Path
 	scored_candidates_path: Path
 
@@ -44,73 +49,52 @@ def _load_ranker(checkpoint_path: Path, *, input_dim: int, device: torch.device)
 	return model
 
 
-def _score_frame(
-	frame: pl.DataFrame,
+@dataclass(slots=True)
+class _MetricAccumulator:
+	hr_sum: float = 0.0
+	mrr_sum: float = 0.0
+	ndcg_sum: float = 0.0
+	recall_sum: float = 0.0
+	query_count: int = 0
+
+	def update(self, ranked_items: list[int], targets: set[int]) -> None:
+		self.hr_sum += hit_rate_at_k(ranked_items, targets, 10)
+		self.mrr_sum += mrr_at_k(ranked_items, targets, 10)
+		self.ndcg_sum += ndcg_at_k(ranked_items, targets, 10)
+		self.recall_sum += recall_at_k(ranked_items, targets, 50)
+		self.query_count += 1
+
+	def as_dict(self) -> dict[str, float]:
+		if self.query_count <= 0:
+			return {"hr@10": 0.0, "mrr@10": 0.0, "ndcg@10": 0.0, "recall@50": 0.0}
+		n = float(self.query_count)
+		return {
+			"hr@10": float(self.hr_sum / n),
+			"mrr@10": float(self.mrr_sum / n),
+			"ndcg@10": float(self.ndcg_sum / n),
+			"recall@50": float(self.recall_sum / n),
+		}
+
+
+def _score_query_group(
+	group: pl.DataFrame,
 	*,
+	model: NeuralRanker,
+	device: torch.device,
 	feature_columns: list[str],
-	checkpoint_path: Path,
 	batch_size: int,
 ) -> pl.DataFrame:
-	features = frame.select(feature_columns).to_numpy().astype(np.float32, copy=False)
-	device = _select_device()
-	model = _load_ranker(checkpoint_path, input_dim=features.shape[1], device=device)
-
-	scores: list[np.ndarray] = []
+	features = group.select(feature_columns).to_numpy().astype(np.float32, copy=False)
+	score_parts: list[np.ndarray] = []
 	with torch.no_grad():
 		for start in range(0, features.shape[0], batch_size):
 			end = min(start + batch_size, features.shape[0])
 			batch = torch.from_numpy(features[start:end]).to(device)
 			logits = model(batch)
-			scores.append(cast(np.ndarray, logits.detach().cpu().numpy().astype(np.float32)))
+			score_parts.append(cast(np.ndarray, logits.detach().cpu().numpy().astype(np.float32)))
 
-	score_values = np.concatenate(scores) if scores else np.zeros((0,), dtype=np.float32)
-
-	return frame.with_columns(pl.Series(name="ranker_score", values=score_values))
-
-
-def _build_predictions(
-	scored: pl.DataFrame,
-) -> tuple[
-	dict[int, list[int]],
-	dict[int, list[int]],
-	dict[int, list[int]] | None,
-	dict[int, set[int]],
-]:
-	ranker_predictions: dict[int, list[int]] = {}
-	residual_predictions: dict[int, list[int]] = {}
-	popularity_predictions: dict[int, list[int]] | None = (
-		{} if "popularity_score" in scored.columns else None
-	)
-	targets: dict[int, set[int]] = {}
-
-	query_groups = scored.partition_by("query_id", maintain_order=True)
-	for query_idx, group in enumerate(query_groups):
-		target_item = int(group.get_column("target_item_idx")[0])
-		targets[query_idx] = {target_item}
-
-		ranker_sorted = group.sort(["ranker_score", "residual_rank"], descending=[True, False])
-		residual_sorted = group.sort(["residual_score", "residual_rank"], descending=[True, False])
-
-		ranker_predictions[query_idx] = [
-			int(v) for v in ranker_sorted.get_column("item_idx").to_list()
-		]
-		residual_predictions[query_idx] = [
-			int(v) for v in residual_sorted.get_column("item_idx").to_list()
-		]
-
-		if popularity_predictions is not None:
-			popularity_sorted = group.sort(
-				["popularity_score", "residual_rank"],
-				descending=[True, False],
-			)
-			popularity_predictions[query_idx] = [
-				int(v) for v in popularity_sorted.get_column("item_idx").to_list()
-			]
-
-	return ranker_predictions, residual_predictions, popularity_predictions, targets
-
-
-def _assert_finite_scores(scored: pl.DataFrame) -> None:
+	score_values = np.concatenate(score_parts) if score_parts else np.zeros((0,), dtype=np.float32)
+	scored = group.with_columns(pl.Series(name="ranker_score", values=score_values))
 	finite = scored.select(
 		[
 			pl.col("ranker_score").is_finite().all().alias("ranker_ok"),
@@ -120,34 +104,137 @@ def _assert_finite_scores(scored: pl.DataFrame) -> None:
 	if not bool(finite[0]) or not bool(finite[1]):
 		msg = "Detected non-finite scores during ranker evaluation"
 		raise ValueError(msg)
+	return scored
+
+
+def _rank_items(group: pl.DataFrame, *, score_column: str) -> list[int]:
+	sorted_group = group.sort(
+		[score_column, "residual_rank", "item_idx"],
+		descending=[True, False, False],
+	)
+	return [int(value) for value in sorted_group.get_column("item_idx").to_list()]
+
+
+def _target_items(group: pl.DataFrame) -> set[int]:
+	positives = {
+		int(value)
+		for value in group.filter(pl.col("label") == 1).get_column("item_idx").to_list()
+	}
+	if positives:
+		return positives
+	return {int(group.get_column("target_item_idx")[0])}
 
 
 def evaluate_ranker_split(
 	*,
-	feature_path: Path,
+	feature_paths: list[Path],
+	feature_columns: list[str],
 	checkpoint_path: Path,
 	split: str,
 	report_dir: Path,
 	batch_size: int,
+	max_queries: int | None = None,
+	log_every_queries: int = 1000,
+	log_file_path: Path | None = None,
+	logger: logging.Logger | None = None,
 ) -> RankerEvaluationResult:
-	frame = pl.read_parquet(feature_path).sort(["query_id", "residual_rank", "item_idx"])
-	feature_columns = infer_feature_columns(frame)
-	scored = _score_frame(
-		frame,
-		feature_columns=feature_columns,
-		checkpoint_path=checkpoint_path,
-		batch_size=batch_size,
-	)
-	_assert_finite_scores(scored)
+	if not feature_paths:
+		msg = f"No feature shards available for split '{split}'"
+		raise FileNotFoundError(msg)
 
-	ranker_pred, residual_pred, popularity_pred, targets = _build_predictions(scored)
-	ranker_metrics = aggregate_ranking_metrics(ranker_pred, targets)
-	residual_metrics = aggregate_ranking_metrics(residual_pred, targets)
-	popularity_metrics = (
-		aggregate_ranking_metrics(popularity_pred, targets)
-		if popularity_pred is not None
-		else None
-	)
+	device = _select_device()
+	model = _load_ranker(checkpoint_path, input_dim=len(feature_columns), device=device)
+
+	columns = [
+		"query_id",
+		"item_idx",
+		"target_item_idx",
+		"label",
+		"residual_score",
+		"residual_rank",
+		*feature_columns,
+	]
+	include_popularity = False
+	first_frame = pl.read_parquet(feature_paths[0], n_rows=1024)
+	if "popularity_score" in first_frame.columns:
+		include_popularity = True
+		if "popularity_score" not in columns:
+			columns.insert(6, "popularity_score")
+
+	ranker_acc = _MetricAccumulator()
+	residual_acc = _MetricAccumulator()
+	popularity_acc = _MetricAccumulator() if include_popularity else None
+
+	queries_processed = 0
+	rows_processed = 0
+	buffered_frames: list[pl.DataFrame] = []
+	buffered_rows = 0
+
+	report_dir.mkdir(parents=True, exist_ok=True)
+	scored_path = report_dir / f"ranker_eval_{split}_scored_candidates.parquet"
+	if scored_path.exists():
+		scored_path.unlink()
+	writer: pq.ParquetWriter | None = None
+
+	def _flush_scored_frames() -> None:
+		nonlocal buffered_rows, writer
+		if not buffered_frames:
+			return
+		frame = pl.concat(buffered_frames, how="vertical")
+		table = frame.to_arrow()
+		if writer is None:
+			writer = pq.ParquetWriter(str(scored_path), table.schema)
+		writer.write_table(table)
+		buffered_frames.clear()
+		buffered_rows = 0
+
+	for query_group in iter_ranker_query_groups(
+		[str(path) for path in feature_paths],
+		columns=columns,
+		batch_size_rows=max(batch_size * 8, 4096),
+		max_queries=max_queries,
+	):
+		scored = _score_query_group(
+			query_group,
+			model=model,
+			device=device,
+			feature_columns=feature_columns,
+			batch_size=batch_size,
+		)
+
+		targets = _target_items(scored)
+		ranker_acc.update(_rank_items(scored, score_column="ranker_score"), targets)
+		residual_acc.update(_rank_items(scored, score_column="residual_score"), targets)
+		if popularity_acc is not None and "popularity_score" in scored.columns:
+			popularity_acc.update(_rank_items(scored, score_column="popularity_score"), targets)
+
+		queries_processed += 1
+		rows_processed += int(scored.height)
+		buffered_rows += int(scored.height)
+		buffered_frames.append(scored)
+		if buffered_rows >= 20000:
+			_flush_scored_frames()
+
+		if log_every_queries > 0 and queries_processed % log_every_queries == 0:
+			prefix = (
+				"[ranker-eval]"
+				f" split={split}"
+				f" queries={queries_processed}"
+				f" rows={rows_processed}"
+				f" log_file={log_file_path if log_file_path is not None else '-'}"
+			)
+			if logger is not None:
+				log_memory_status(prefix, logger=logger, disk_path=report_dir)
+			else:
+				log_memory_status(prefix, disk_path=report_dir)
+
+	_flush_scored_frames()
+	if writer is not None:
+		writer.close()
+
+	ranker_metrics = ranker_acc.as_dict()
+	residual_metrics = residual_acc.as_dict()
+	popularity_metrics = popularity_acc.as_dict() if popularity_acc is not None else None
 
 	delta_vs_residual = {
 		metric: float(ranker_metrics[metric] - residual_metrics[metric])
@@ -160,7 +247,10 @@ def evaluate_ranker_split(
 		"residual": residual_metrics,
 		"delta_vs_residual": delta_vs_residual,
 		"beats_residual_ndcg@10": ranker_metrics["ndcg@10"] > residual_metrics["ndcg@10"],
-		"feature_path": str(feature_path),
+		"feature_paths": [str(path) for path in feature_paths],
+		"feature_columns": feature_columns,
+		"query_count": queries_processed,
+		"row_count": rows_processed,
 		"checkpoint_path": str(checkpoint_path),
 	}
 	if popularity_metrics is not None:
@@ -171,16 +261,15 @@ def evaluate_ranker_split(
 		}
 
 	report_path = report_dir / f"ranker_eval_{split}.json"
-	scored_path = report_dir / f"ranker_eval_{split}_scored_candidates.parquet"
-	report_dir.mkdir(parents=True, exist_ok=True)
 	save_json(report_path, report_payload)
-	scored.write_parquet(scored_path)
 
 	return RankerEvaluationResult(
 		split=split,
 		ranker_metrics=ranker_metrics,
 		residual_metrics=residual_metrics,
 		popularity_metrics=popularity_metrics,
+		query_count=queries_processed,
+		row_count=rows_processed,
 		report_path=report_path,
 		scored_candidates_path=scored_path,
 	)

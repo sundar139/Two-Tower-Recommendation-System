@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -142,15 +144,167 @@ def make_ranker_dataloader(
 	batch_size: int,
 	shuffle: bool,
 	num_workers: int,
+	pin_memory: bool,
+	prefetch_factor: int | None,
+	persistent_workers: bool,
 	seed: int,
 ) -> DataLoader[dict[str, Any]]:
 	generator = torch.Generator().manual_seed(seed)
+	loader_kwargs: dict[str, Any] = {
+		"dataset": dataset,
+		"batch_size": batch_size,
+		"shuffle": shuffle,
+		"num_workers": num_workers,
+		"collate_fn": collate_ranker_batch,
+		"generator": generator,
+		"drop_last": False,
+		"pin_memory": pin_memory,
+	}
+	if num_workers > 0:
+		loader_kwargs["persistent_workers"] = persistent_workers
+		if prefetch_factor is not None:
+			loader_kwargs["prefetch_factor"] = int(prefetch_factor)
 	return DataLoader(
-		dataset,
-		batch_size=batch_size,
-		shuffle=shuffle,
-		num_workers=num_workers,
-		collate_fn=collate_ranker_batch,
-		generator=generator,
-		drop_last=False,
+		**loader_kwargs,
 	)
+
+
+def iter_ranker_feature_batches(
+	feature_paths: list[str],
+	*,
+	feature_columns: list[str],
+	batch_size: int,
+	shuffle: bool,
+	seed: int,
+	max_rows: int | None = None,
+) -> Iterator[dict[str, Any]]:
+	"""Yield mini-batches directly from parquet shards without full in-memory materialization."""
+
+	if batch_size <= 0:
+		msg = "batch_size must be positive"
+		raise ValueError(msg)
+
+	columns = [
+		"query_id",
+		"item_idx",
+		"target_item_idx",
+		"residual_score",
+		"residual_rank",
+		"label",
+		*feature_columns,
+	]
+	rows_yielded = 0
+	batch_seed = int(seed)
+
+	for feature_path in feature_paths:
+		parquet_file = pq.ParquetFile(feature_path)
+		for record_batch in parquet_file.iter_batches(batch_size=batch_size, columns=columns):
+			frame = cast(pl.DataFrame, pl.from_arrow(record_batch))
+			if frame.height == 0:
+				continue
+
+			if max_rows is not None:
+				remaining = int(max_rows) - rows_yielded
+				if remaining <= 0:
+					return
+				if frame.height > remaining:
+					frame = frame.slice(0, remaining)
+
+			if shuffle and frame.height > 1:
+				frame = frame.sample(
+					n=frame.height,
+					with_replacement=False,
+					shuffle=True,
+					seed=batch_seed,
+				)
+
+			rows_yielded += int(frame.height)
+			batch_seed += 1
+
+			feature_values = frame.select(feature_columns).to_numpy().astype(np.float32, copy=False)
+			labels = frame.get_column("label").to_numpy().astype(np.float32, copy=False)
+			item_idx = frame.get_column("item_idx").to_numpy().astype(np.int64, copy=False)
+			target_item_idx = frame.get_column("target_item_idx").to_numpy().astype(
+				np.int64,
+				copy=False,
+			)
+			residual_score = frame.get_column("residual_score").to_numpy().astype(
+				np.float32,
+				copy=False,
+			)
+			residual_rank = frame.get_column("residual_rank").to_numpy().astype(
+				np.int64,
+				copy=False,
+			)
+			yield {
+				"features": torch.from_numpy(feature_values.copy()),
+				"labels": torch.from_numpy(labels.copy()),
+				"query_ids": [str(value) for value in frame.get_column("query_id").to_list()],
+				"item_idx": torch.from_numpy(item_idx.copy()),
+				"target_item_idx": torch.from_numpy(target_item_idx.copy()),
+				"residual_score": torch.from_numpy(residual_score.copy()),
+				"residual_rank": torch.from_numpy(residual_rank.copy()),
+			}
+
+			if max_rows is not None and rows_yielded >= int(max_rows):
+				return
+
+
+def iter_ranker_query_groups(
+	feature_paths: list[str],
+	*,
+	columns: list[str],
+	batch_size_rows: int,
+	max_rows: int | None = None,
+	max_queries: int | None = None,
+) -> Iterator[pl.DataFrame]:
+	"""Yield query-complete frames from sorted shard files in a streaming manner."""
+
+	if batch_size_rows <= 0:
+		msg = "batch_size_rows must be positive"
+		raise ValueError(msg)
+
+	query_count = 0
+	rows_seen = 0
+	carryover: pl.DataFrame | None = None
+
+	for feature_path in feature_paths:
+		parquet_file = pq.ParquetFile(feature_path)
+		for record_batch in parquet_file.iter_batches(
+			batch_size=batch_size_rows,
+			columns=columns,
+		):
+			frame = cast(pl.DataFrame, pl.from_arrow(record_batch))
+			if frame.height == 0:
+				continue
+
+			if max_rows is not None:
+				remaining = int(max_rows) - rows_seen
+				if remaining <= 0:
+					break
+				if frame.height > remaining:
+					frame = frame.slice(0, remaining)
+
+			rows_seen += int(frame.height)
+
+			if carryover is not None and carryover.height > 0:
+				frame = pl.concat([carryover, frame], how="vertical")
+				carryover = None
+
+			groups = frame.partition_by("query_id", maintain_order=True)
+			if not groups:
+				continue
+
+			for group in groups[:-1]:
+				yield group
+				query_count += 1
+				if max_queries is not None and query_count >= int(max_queries):
+					return
+
+			carryover = groups[-1]
+
+		if max_rows is not None and rows_seen >= int(max_rows):
+			break
+
+	if carryover is not None and carryover.height > 0:
+		yield carryover

@@ -13,17 +13,9 @@ import typer
 from movie_recsys.modeling.artifacts import save_json
 from movie_recsys.ranking.candidates import REQUIRED_CANDIDATE_COLUMNS
 from movie_recsys.ranking.config import RankerConfig, load_ranker_config
-from movie_recsys.ranking.features import METADATA_ONLY_COLUMNS
+from movie_recsys.ranking.features import METADATA_ONLY_COLUMNS, load_feature_manifest
 
 app = typer.Typer(add_completion=False)
-
-
-def _pearson(x: np.ndarray, y: np.ndarray) -> float:
-	if x.size == 0 or y.size == 0:
-		return 0.0
-	if np.std(x) == 0.0 or np.std(y) == 0.0:
-		return 0.0
-	return float(np.corrcoef(x, y)[0, 1])
 
 
 def _to_float(value: Any, *, default: float = 0.0) -> float:
@@ -50,22 +42,33 @@ def _feature_list_check(
 	split: str,
 	sample: bool,
 ) -> dict[str, Any]:
-	meta_path = ranker_cfg.features_path(split=split, sample=sample).with_suffix(".meta.json")
-	if not meta_path.exists():
-		return {
-			"feature_meta_found": False,
-			"metadata_columns_excluded": True,
-			"checked_columns": sorted(METADATA_ONLY_COLUMNS),
-		}
+	feature_columns: list[str] = []
+	feature_meta_found = False
+	if sample:
+		meta_path = ranker_cfg.features_path(split=split, sample=sample).with_suffix(".meta.json")
+		if meta_path.exists():
+			with meta_path.open("r", encoding="utf-8") as handle:
+				payload = json.load(handle)
+			raw_columns = payload.get("feature_columns", [])
+			if isinstance(raw_columns, list):
+				feature_columns = [str(name) for name in raw_columns]
+				feature_meta_found = True
+	else:
+		manifest = load_feature_manifest(ranker_cfg, sample=False)
+		splits_payload = manifest.get("splits", {})
+		if isinstance(splits_payload, dict):
+			split_payload = splits_payload.get(split, {})
+			if isinstance(split_payload, dict):
+				raw_columns = split_payload.get("feature_columns")
+				if not isinstance(raw_columns, list):
+					raw_columns = manifest.get("feature_columns", [])
+				if isinstance(raw_columns, list):
+					feature_columns = [str(name) for name in raw_columns]
+					feature_meta_found = True
 
-	with meta_path.open("r", encoding="utf-8") as handle:
-		payload = json.load(handle)
-	feature_columns = payload.get("feature_columns", [])
-	if not isinstance(feature_columns, list):
-		feature_columns = []
 	feature_set = {str(name) for name in feature_columns}
 	return {
-		"feature_meta_found": True,
+		"feature_meta_found": feature_meta_found,
 		"metadata_columns_excluded": METADATA_ONLY_COLUMNS.isdisjoint(feature_set),
 		"checked_columns": sorted(METADATA_ONLY_COLUMNS),
 		"feature_column_count": len(feature_columns),
@@ -79,18 +82,26 @@ def _diagnose_split(
 	split: str,
 	sample: bool,
 ) -> dict[str, Any]:
-	frame = pl.read_parquet(candidate_path)
-	query_group = frame.group_by("query_id").agg(pl.len().alias("candidate_count"))
-	positive = frame.filter(pl.col("label") == 1)
+	frame = pl.scan_parquet(candidate_path)
+	rows = int(frame.select(pl.len()).collect().item())
+	queries = int(frame.select(pl.col("query_id").n_unique()).collect().item())
 
-	rows = int(frame.height)
-	queries = int(query_group.height)
-	avg_candidates = _to_float(query_group.get_column("candidate_count").mean())
-	min_candidates = _to_int(query_group.get_column("candidate_count").min())
-	max_candidates = _to_int(query_group.get_column("candidate_count").max())
+	query_stats = frame.group_by("query_id").len().select(
+		[
+			pl.col("len").mean().alias("avg"),
+			pl.col("len").min().alias("min"),
+			pl.col("len").max().alias("max"),
+		]
+	).collect().row(0, named=True)
+	avg_candidates = _to_float(query_stats.get("avg"))
+	min_candidates = _to_int(query_stats.get("min"))
+	max_candidates = _to_int(query_stats.get("max"))
 
 	target_injected_positive_rate = _to_float(
-		positive.get_column("target_injected").cast(pl.Float64).mean()
+		frame.filter(pl.col("label") == 1)
+		.select(pl.col("target_injected").cast(pl.Float64).mean())
+		.collect()
+		.item()
 	)
 	residual_topk_hit_rate = float(1.0 - target_injected_positive_rate)
 
@@ -98,27 +109,61 @@ def _diagnose_split(
 		frame.group_by("query_id")
 		.agg(pl.col("label").sum().alias("pos_count"))
 		.filter(pl.col("pos_count") != 1)
-		.height
+		.select(pl.len())
+		.collect()
+		.item()
 	)
 	duplicate_candidate_count = int(
-		frame.group_by(["query_id", "item_idx"]).len().filter(pl.col("len") > 1).height
+		frame.group_by(["query_id", "item_idx"])
+		.len()
+		.filter(pl.col("len") > 1)
+		.select(pl.len())
+		.collect()
+		.item()
 	)
 
 	null_counts = {
-		name: int(frame.select(pl.col(name).is_null().sum()).item())
+		name: int(frame.select(pl.col(name).is_null().sum()).collect().item())
 		for name in REQUIRED_CANDIDATE_COLUMNS
-		if name in frame.columns
+		if name in frame.collect_schema().names()
 	}
 
-	labels = frame.get_column("label").cast(pl.Float64).to_numpy()
-	target_injected = frame.get_column("target_injected").cast(pl.Int8).to_numpy()
-	residual_rank = frame.get_column("residual_rank").cast(pl.Float64).to_numpy()
-	residual_score = frame.get_column("residual_score").cast(pl.Float64).to_numpy()
+	correlation_payload = frame.select(
+		[
+			pl.corr(
+				pl.col("target_injected").cast(pl.Float64),
+				pl.col("label").cast(pl.Float64),
+			).alias("target_injected_corr"),
+			pl.corr(
+				pl.col("residual_rank").cast(pl.Float64),
+				pl.col("label").cast(pl.Float64),
+			).alias("residual_rank_corr"),
+			pl.corr(
+				pl.col("residual_score").cast(pl.Float64),
+				pl.col("label").cast(pl.Float64),
+			).alias("residual_score_corr"),
+		]
+	).collect().row(0, named=True)
+
+	label_means = frame.select(
+		[
+			pl.when(pl.col("target_injected"))
+			.then(pl.col("label"))
+			.otherwise(None)
+			.mean()
+			.alias("label_when_injected"),
+			pl.when(~pl.col("target_injected"))
+			.then(pl.col("label"))
+			.otherwise(None)
+			.mean()
+			.alias("label_when_not_injected"),
+		]
+	).collect().row(0, named=True)
 
 	candidate_source_group = frame.group_by("candidate_source").agg(
 		pl.col("label").mean().alias("label_mean"),
 		pl.len().alias("count"),
-	)
+	).collect()
 	candidate_source_label_mean = {
 		str(row["candidate_source"]): {
 			"label_mean": float(row["label_mean"]),
@@ -144,8 +189,12 @@ def _diagnose_split(
 		"percent_target_injected": float(target_injected_positive_rate * 100.0),
 		"residual_top200_hit_rate": residual_topk_hit_rate,
 		"label_distribution": {
-			"positive": int(positive.height),
-			"negative": int(rows - positive.height),
+			"positive": int(
+				frame.filter(pl.col("label") == 1).select(pl.len()).collect().item()
+			),
+			"negative": int(
+				frame.filter(pl.col("label") == 0).select(pl.len()).collect().item()
+			),
 		},
 		"duplicate_candidate_count": duplicate_candidate_count,
 		"positive_count_violations": positive_count_violations,
@@ -153,26 +202,20 @@ def _diagnose_split(
 		"feature_guard": feature_guard,
 		"suspicious_correlations": {
 			"target_injected_vs_label": {
-				"pearson": _pearson(target_injected.astype(np.float64), labels),
+				"pearson": _to_float(correlation_payload.get("target_injected_corr")),
 				"label_mean_when_target_injected": float(
-					frame.filter(pl.col("target_injected"))
-					.select(pl.col("label").mean())
-					.item()
-					or 0.0
+					_to_float(label_means.get("label_when_injected"))
 				),
 				"label_mean_when_not_target_injected": float(
-					frame.filter(~pl.col("target_injected"))
-					.select(pl.col("label").mean())
-					.item()
-					or 0.0
+					_to_float(label_means.get("label_when_not_injected"))
 				),
 			},
 			"candidate_source_vs_label": candidate_source_label_mean,
 			"residual_rank_vs_label": {
-				"pearson": _pearson(residual_rank, labels),
+				"pearson": _to_float(correlation_payload.get("residual_rank_corr")),
 			},
 			"residual_score_vs_label": {
-				"pearson": _pearson(residual_score, labels),
+				"pearson": _to_float(correlation_payload.get("residual_score_corr")),
 			},
 		},
 	}

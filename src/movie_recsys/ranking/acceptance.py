@@ -53,15 +53,29 @@ def primary_rules(
 
 
 def guard_one_positive_per_query(candidate_path: Path) -> bool:
-	frame = pl.read_parquet(candidate_path)
-	grouped = frame.group_by("query_id").agg(pl.col("label").sum().alias("pos_count"))
-	return grouped.filter(pl.col("pos_count") != 1).height == 0
+	frame = pl.scan_parquet(candidate_path)
+	violations = (
+		frame.group_by("query_id")
+		.agg(pl.col("label").sum().alias("pos_count"))
+		.filter(pl.col("pos_count") != 1)
+		.select(pl.len())
+		.collect()
+		.item()
+	)
+	return int(violations) == 0
 
 
 def guard_no_duplicate_candidates(candidate_path: Path) -> bool:
-	frame = pl.read_parquet(candidate_path)
-	duplicates = frame.group_by(["query_id", "item_idx"]).len().filter(pl.col("len") > 1)
-	return duplicates.height == 0
+	frame = pl.scan_parquet(candidate_path)
+	duplicates = (
+		frame.group_by(["query_id", "item_idx"])
+		.len()
+		.filter(pl.col("len") > 1)
+		.select(pl.len())
+		.collect()
+		.item()
+	)
+	return int(duplicates) == 0
 
 
 def guard_no_candidate_leakage(
@@ -70,42 +84,44 @@ def guard_no_candidate_leakage(
 	val_candidates: Path,
 	test_candidates: Path,
 ) -> bool:
-	train_frame = pl.read_parquet(train_candidates)
-	val_frame = pl.read_parquet(val_candidates)
-	test_frame = pl.read_parquet(test_candidates)
-
-	train_pairs = {
-		(int(user_idx), int(item_idx))
-		for user_idx, item_idx in train_frame.filter(pl.col("label") == 1)
+	train_pairs = (
+		pl.scan_parquet(train_candidates)
+		.filter(pl.col("label") == 1)
 		.select(["user_idx", "target_item_idx"])
-		.iter_rows()
-	}
-	heldout_pairs = {
-		(int(user_idx), int(item_idx))
-		for user_idx, item_idx in val_frame.filter(pl.col("label") == 1)
-		.select(["user_idx", "target_item_idx"])
-		.iter_rows()
-	}.union(
-		{
-			(int(user_idx), int(item_idx))
-			for user_idx, item_idx in test_frame.filter(pl.col("label") == 1)
-			.select(["user_idx", "target_item_idx"])
-			.iter_rows()
-		}
+		.unique()
 	)
-	return len(train_pairs.intersection(heldout_pairs)) == 0
+	heldout_pairs = pl.concat(
+		[
+			pl.scan_parquet(val_candidates)
+			.filter(pl.col("label") == 1)
+			.select(["user_idx", "target_item_idx"]),
+			pl.scan_parquet(test_candidates)
+			.filter(pl.col("label") == 1)
+			.select(["user_idx", "target_item_idx"]),
+		],
+		how="vertical",
+	).unique()
+
+	intersection_count = (
+		train_pairs.join(heldout_pairs, on=["user_idx", "target_item_idx"], how="inner")
+		.select(pl.len())
+		.collect()
+		.item()
+	)
+	return int(intersection_count) == 0
 
 
 def guard_finite_scores(scored_candidates_path: Path) -> bool:
-	frame = pl.read_parquet(scored_candidates_path)
-	if "ranker_score" not in frame.columns:
+	frame = pl.scan_parquet(scored_candidates_path)
+	schema_names = set(frame.collect_schema().names())
+	if "ranker_score" not in schema_names:
 		return False
 	checks = frame.select(
 		[
 			pl.col("ranker_score").is_finite().all().alias("ranker_ok"),
 			pl.col("residual_score").is_finite().all().alias("residual_ok"),
 		]
-	).row(0)
+	).collect().row(0)
 	return bool(checks[0]) and bool(checks[1])
 
 
