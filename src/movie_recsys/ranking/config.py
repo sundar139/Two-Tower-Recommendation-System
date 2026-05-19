@@ -18,6 +18,7 @@ class RankerPathsConfig(BaseModel):
 	model_config = ConfigDict(extra="forbid")
 
 	ranker_candidate_dir: Path
+	ranker_feature_dir: Path
 	ranker_model_dir: Path
 	ranker_report_dir: Path
 
@@ -54,6 +55,17 @@ class RankerConfig(BaseModel):
 	scheduler: Literal["none", "cosine", "plateau", "warmup_cosine"] = "warmup_cosine"
 	warmup_steps: int = 200
 	random_seed: int = 42
+	max_ram_percent: float = 85.0
+	max_pagefile_percent: float | None = None
+	train_num_workers: int = 0
+	eval_num_workers: int = 0
+	pin_memory: bool = False
+	prefetch_factor: int | None = None
+	persistent_workers: bool = False
+	full_eval_batch_size: int = 4096
+	full_train_batch_size: int = 4096
+	feature_shard_size: int = 500000
+	log_every_batches: int = 100
 
 	mlflow_tracking_uri: str
 	mlflow_artifact_root: str
@@ -74,7 +86,23 @@ class RankerConfig(BaseModel):
 		return self.candidate_dir_for_scope(sample=sample) / f"ranker_candidates_{split}.parquet"
 
 	def features_path(self, *, split: str, sample: bool) -> Path:
-		return self.candidate_dir_for_scope(sample=sample) / f"ranker_features_{split}.parquet"
+		if sample:
+			# Keep the sample path unchanged for backwards compatibility.
+			return self.candidate_dir_for_scope(sample=sample) / f"ranker_features_{split}.parquet"
+		return self.feature_split_dir(split=split, sample=sample) / "part_000000.parquet"
+
+	def feature_root_for_scope(self, *, sample: bool) -> Path:
+		if sample:
+			return self.candidate_dir_for_scope(sample=sample)
+		return self.paths.ranker_feature_dir / self.artifact_scope(sample=sample)
+
+	def feature_split_dir(self, *, split: str, sample: bool) -> Path:
+		return self.feature_root_for_scope(sample=sample) / split
+
+	def feature_manifest_path(self, *, sample: bool) -> Path:
+		if sample:
+			return self.feature_root_for_scope(sample=sample) / "ranker_features_manifest.json"
+		return self.feature_root_for_scope(sample=sample) / "ranker_features_manifest.json"
 
 	@property
 	def best_checkpoint(self) -> Path:
@@ -109,6 +137,46 @@ def _as_int(raw: dict[str, object], key: str, default: int) -> int:
 	if isinstance(value, str):
 		return int(value)
 	msg = f"Expected integer-like value for {key}, got {type(value).__name__}"
+	raise ValueError(msg)
+
+
+def _as_optional_int(raw: dict[str, object], key: str, default: int | None) -> int | None:
+	value = raw.get(key, default)
+	if value is None:
+		return None
+	if isinstance(value, bool):
+		return int(value)
+	if isinstance(value, int):
+		return value
+	if isinstance(value, float):
+		return int(value)
+	if isinstance(value, str):
+		trimmed = value.strip()
+		if trimmed.lower() in {"", "none", "null"}:
+			return None
+		return int(trimmed)
+	msg = f"Expected optional integer-like value for {key}, got {type(value).__name__}"
+	raise ValueError(msg)
+
+
+def _as_optional_float(
+	raw: dict[str, object],
+	key: str,
+	default: float | None,
+) -> float | None:
+	value = raw.get(key, default)
+	if value is None:
+		return None
+	if isinstance(value, bool):
+		return float(value)
+	if isinstance(value, (int, float)):
+		return float(value)
+	if isinstance(value, str):
+		trimmed = value.strip()
+		if trimmed.lower() in {"", "none", "null"}:
+			return None
+		return float(trimmed)
+	msg = f"Expected optional float-like value for {key}, got {type(value).__name__}"
 	raise ValueError(msg)
 
 
@@ -235,6 +303,17 @@ def load_ranker_config(
 		scheduler=_normalize_scheduler(_as_str(raw, "scheduler", "warmup_cosine")),
 		warmup_steps=_as_int(raw, "warmup_steps", 200),
 		random_seed=_as_int(raw, "random_seed", 42),
+		max_ram_percent=_as_float(raw, "max_ram_percent", 85.0),
+		max_pagefile_percent=_as_optional_float(raw, "max_pagefile_percent", None),
+		train_num_workers=_as_int(raw, "train_num_workers", 0),
+		eval_num_workers=_as_int(raw, "eval_num_workers", 0),
+		pin_memory=_as_bool(raw, "pin_memory", False),
+		prefetch_factor=_as_optional_int(raw, "prefetch_factor", None),
+		persistent_workers=_as_bool(raw, "persistent_workers", False),
+		full_eval_batch_size=_as_int(raw, "full_eval_batch_size", 4096),
+		full_train_batch_size=_as_int(raw, "full_train_batch_size", 4096),
+		feature_shard_size=_as_int(raw, "feature_shard_size", 500000),
+		log_every_batches=_as_int(raw, "log_every_batches", 100),
 		mlflow_tracking_uri=_as_str(raw, "mlflow_tracking_uri", env.MLFLOW_TRACKING_URI),
 		mlflow_artifact_root=_as_str(raw, "mlflow_artifact_root", env.MLFLOW_ARTIFACT_ROOT),
 		mlflow_experiment_name=_as_str(raw, "mlflow_experiment_name", env.MLFLOW_EXPERIMENT_NAME),
@@ -244,6 +323,9 @@ def load_ranker_config(
 		paths=RankerPathsConfig(
 			ranker_candidate_dir=_resolve_path(
 				_as_str(raw, "ranker_candidate_dir", "artifacts/ranker/candidates")
+			),
+			ranker_feature_dir=_resolve_path(
+				_as_str(raw, "ranker_feature_dir", "artifacts/ranker/features")
 			),
 			ranker_model_dir=_resolve_path(
 				_as_str(raw, "ranker_model_dir", env.MODEL_OUTPUT_DIR)
@@ -255,6 +337,7 @@ def load_ranker_config(
 	)
 
 	config.paths.ranker_candidate_dir.mkdir(parents=True, exist_ok=True)
+	config.paths.ranker_feature_dir.mkdir(parents=True, exist_ok=True)
 	config.paths.ranker_model_dir.mkdir(parents=True, exist_ok=True)
 	config.paths.ranker_report_dir.mkdir(parents=True, exist_ok=True)
 	return config
