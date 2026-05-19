@@ -25,8 +25,20 @@ gradient_clip_norm: 1.0
 scheduler: warmup_cosine
 warmup_steps: 200
 random_seed: 42
+max_ram_percent: 85.0
+max_pagefile_percent: null
+train_num_workers: 0
+eval_num_workers: 0
+pin_memory: false
+prefetch_factor: null
+persistent_workers: false
+full_eval_batch_size: 4096
+full_train_batch_size: 4096
+feature_shard_size: 500000
+log_every_batches: 100
 
 ranker_candidate_dir: artifacts/ranker/candidates
+ranker_feature_dir: artifacts/ranker/features
 ranker_model_dir: artifacts/models
 ranker_report_dir: artifacts/reports
 
