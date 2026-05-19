@@ -9,6 +9,8 @@ import polars as pl
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from movie_recsys.ranking.features import resolve_feature_allowlist
+
 METADATA_COLUMNS = {
 	"query_id",
 	"user_idx",
@@ -24,14 +26,25 @@ METADATA_COLUMNS = {
 
 
 def infer_feature_columns(frame: pl.DataFrame) -> list[str]:
-	"""Infer numeric feature columns while excluding metadata fields."""
+	"""Infer model feature columns from the explicit feature allowlist."""
 
-	return sorted(
-		[
-			name
-			for name, dtype in frame.schema.items()
-			if dtype.is_numeric() and name not in METADATA_COLUMNS
+	use_frozen_features = any(
+		name in frame.columns
+		for name in [
+			"frozen_emb_dot",
+			"frozen_emb_prod_mean",
+			"frozen_emb_prod_max",
+			"frozen_emb_prod_min",
+			"frozen_emb_prod_std",
+			"frozen_emb_absdiff_mean",
+			"frozen_emb_absdiff_max",
+			"frozen_emb_absdiff_min",
+			"frozen_emb_absdiff_std",
 		]
+	)
+	return resolve_feature_allowlist(
+		frame,
+		use_frozen_features=use_frozen_features,
 	)
 
 

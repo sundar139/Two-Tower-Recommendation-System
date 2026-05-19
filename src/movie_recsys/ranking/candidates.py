@@ -7,8 +7,12 @@ which uses train history only (`users.train_history_item_idx`).
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, cast
 
 import numpy as np
@@ -58,6 +62,129 @@ class QueryContext:
 	target_item_idx: int
 	history_item_idx: list[int]
 	timestamp_context: int
+
+
+@dataclass(slots=True)
+class CandidateGenerationOptions:
+	chunk_size: int = 5000
+	resume: bool = False
+	max_users: int | None = None
+	splits: tuple[str, ...] = ("train", "val", "test")
+	overwrite: bool = False
+	progress_every: int = 1000
+
+
+UTC_TZ = getattr(datetime, "UTC", timezone.utc)  # noqa: UP017
+
+
+def _utc_now_iso() -> str:
+	return datetime.now(UTC_TZ).isoformat()
+
+
+def _memory_usage_mb() -> float | None:
+	return None
+
+
+def _emit_progress(
+	*,
+	split: str,
+	processed_queries: int,
+	total_queries: int,
+	candidates_written: int,
+	elapsed_seconds: float,
+	output_path: Path,
+) -> None:
+	rate = float(processed_queries / elapsed_seconds) if elapsed_seconds > 0 else 0.0
+	remaining_queries = max(total_queries - processed_queries, 0)
+	eta_seconds = float(remaining_queries / rate) if rate > 0 else 0.0
+	memory_mb = _memory_usage_mb()
+	memory_text = f" memory_mb={memory_mb:.1f}" if memory_mb is not None else ""
+	print(
+		"[ranker-candidates]"
+		f" split={split}"
+		f" processed_queries={processed_queries}/{total_queries}"
+		f" candidates_written={candidates_written}"
+		f" elapsed_s={elapsed_seconds:.1f}"
+		f" eta_s={eta_seconds:.1f}"
+		f" output_path={output_path}"
+		f"{memory_text}",
+		flush=True,
+	)
+
+
+def _normalize_splits(splits: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+	if splits is None:
+		return ("train", "val", "test")
+	allowed = {"train", "val", "test"}
+	normalized = tuple(split.strip().lower() for split in splits if split.strip())
+	if not normalized:
+		msg = "At least one split must be requested"
+		raise ValueError(msg)
+	unknown = sorted(set(normalized) - allowed)
+	if unknown:
+		msg = f"Unsupported split values: {', '.join(unknown)}"
+		raise ValueError(msg)
+	# Keep deterministic ordering for reproducible outputs and chunk names.
+	ordered = tuple(split for split in ("train", "val", "test") if split in normalized)
+	return ordered
+
+
+def _config_hash(
+	*,
+	ranker_cfg: RankerConfig,
+	retrieval_cfg: RetrievalConfig,
+	options: CandidateGenerationOptions,
+	sample: bool,
+) -> str:
+	payload = {
+		"sample": sample,
+		"splits": list(options.splits),
+		"chunk_size": options.chunk_size,
+		"candidate_top_k": ranker_cfg.candidate_top_k,
+		"use_frozen_retrieval_embeddings": ranker_cfg.use_frozen_retrieval_embeddings,
+		"retriever_config": str(ranker_cfg.retriever_config),
+		"retriever_checkpoint": str(ranker_cfg.retriever_checkpoint),
+		"history_length": retrieval_cfg.train.history_length,
+		"random_seed": ranker_cfg.random_seed,
+	}
+	encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+	return hashlib.sha256(encoded).hexdigest()
+
+
+def _manifest_path(ranker_cfg: RankerConfig, *, sample: bool) -> Path:
+	return ranker_cfg.candidate_dir_for_scope(sample=sample) / "ranker_candidates_manifest.json"
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+	if not path.exists():
+		return {}
+	with path.open("r", encoding="utf-8") as handle:
+		payload = json.load(handle)
+	if not isinstance(payload, dict):
+		msg = f"Invalid manifest format in {path}"
+		raise ValueError(msg)
+	return cast(dict[str, Any], payload)
+
+
+def _save_manifest(path: Path, manifest: dict[str, Any]) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	with path.open("w", encoding="utf-8") as handle:
+		json.dump(manifest, handle, indent=2, sort_keys=True)
+		handle.write("\n")
+
+
+def _chunk_dir(ranker_cfg: RankerConfig, *, sample: bool, split: str) -> Path:
+	return ranker_cfg.candidate_dir_for_scope(sample=sample) / "chunks" / split
+
+
+def _merge_chunks(chunk_files: list[Path], *, output_path: Path) -> None:
+	if not chunk_files:
+		msg = "No chunk files found for merge"
+		raise ValueError(msg)
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	if output_path.exists():
+		output_path.unlink()
+	pl.concat([pl.scan_parquet(path) for path in chunk_files]).sink_parquet(output_path)
 
 
 def _select_device(device_name: str) -> torch.device:
@@ -336,9 +463,12 @@ def _build_candidate_frame(
 	history_length: int,
 	use_embedding_features: bool,
 	device: torch.device,
+	progress_every: int,
+	output_path: Path,
 ) -> pl.DataFrame:
 	rows: list[dict[str, object]] = []
-	for query in queries:
+	start = monotonic()
+	for query_idx, query in enumerate(queries, start=1):
 		rows.extend(
 			_query_rows(
 				query,
@@ -353,9 +483,27 @@ def _build_candidate_frame(
 			)
 		)
 
+		if progress_every > 0 and query_idx % progress_every == 0:
+			_emit_progress(
+				split=split,
+				processed_queries=query_idx,
+				total_queries=len(queries),
+				candidates_written=len(rows),
+				elapsed_seconds=monotonic() - start,
+				output_path=output_path,
+			)
+
 	frame = pl.DataFrame(rows)
 	sort_columns = ["query_id", "residual_rank", "item_idx"]
 	frame = frame.sort(sort_columns)
+	_emit_progress(
+		split=split,
+		processed_queries=len(queries),
+		total_queries=len(queries),
+		candidates_written=frame.height,
+		elapsed_seconds=monotonic() - start,
+		output_path=output_path,
+	)
 	return frame
 
 
@@ -388,6 +536,12 @@ def validate_candidate_frame(
 	max_size_ok = (
 		frame.group_by("query_id").len().filter(pl.col("len") > 201).height == 0
 	)
+
+	required_non_null = frame.select(
+		[pl.col(name).is_null().any().alias(name) for name in REQUIRED_CANDIDATE_COLUMNS]
+	).row(0)
+	non_null_required_columns = all(not bool(value) for value in required_non_null)
+	finite_residual_score = bool(frame.select(pl.col("residual_score").is_finite().all()).item())
 
 	rank_ok = (
 		frame.group_by("query_id")
@@ -456,6 +610,136 @@ def validate_candidate_frame(
 		"no_duplicate_candidate_item_per_query": bool(duplicates),
 		"candidate_set_size_le_201": bool(max_size_ok),
 		"residual_rank_contiguous_and_stable": bool(rank_ok),
+		"required_columns_non_null": bool(non_null_required_columns),
+		"residual_score_finite": bool(finite_residual_score),
+		"deterministic_query_id": bool(deterministic_query_ids),
+		"no_val_test_target_leakage": bool(no_leakage),
+	}
+
+	failed = [name for name, passed in checks.items() if not passed]
+	if failed:
+		msg = f"Candidate validation failed for split '{split}': {', '.join(failed)}"
+		raise ValueError(msg)
+	return checks
+
+
+def validate_candidate_path(
+	path: Path,
+	*,
+	split: str,
+	leaked_targets: set[int] | set[tuple[int, int]] | None = None,
+) -> dict[str, bool]:
+	if not path.exists():
+		msg = f"Candidate parquet not found for split '{split}': {path}"
+		raise FileNotFoundError(msg)
+	frame = pl.scan_parquet(path)
+	row_count = int(frame.select(pl.len()).collect().item())
+	if row_count == 0:
+		msg = f"Candidate frame for split '{split}' is empty"
+		raise ValueError(msg)
+
+	positives_ok = (
+		frame.group_by("query_id")
+		.agg(pl.col("label").sum().alias("positive_count"))
+		.filter(pl.col("positive_count") != 1)
+		.select(pl.len())
+		.collect()
+		.item()
+		== 0
+	)
+
+	duplicates_ok = (
+		frame.group_by(["query_id", "item_idx"])
+		.len()
+		.filter(pl.col("len") > 1)
+		.select(pl.len())
+		.collect()
+		.item()
+		== 0
+	)
+
+	size_ok = (
+		frame.group_by("query_id")
+		.len()
+		.filter(pl.col("len") > 201)
+		.select(pl.len())
+		.collect()
+		.item()
+		== 0
+	)
+
+	rank_ok = (
+		frame.group_by("query_id")
+		.agg(
+			pl.col("residual_rank").min().alias("min_rank"),
+			pl.col("residual_rank").max().alias("max_rank"),
+			pl.col("residual_rank").n_unique().alias("unique_rank"),
+			pl.len().alias("count"),
+		)
+		.filter(
+			(pl.col("min_rank") != 1)
+			| (pl.col("max_rank") != pl.col("count"))
+			| (pl.col("unique_rank") != pl.col("count"))
+		)
+		.select(pl.len())
+		.collect()
+		.item()
+		== 0
+	)
+
+	required_non_null = frame.select(
+		[pl.col(name).is_null().any().alias(name) for name in REQUIRED_CANDIDATE_COLUMNS]
+	).collect()
+	non_null_required_columns = all(not bool(value) for value in required_non_null.row(0))
+	finite_residual_score = bool(
+		frame.select(pl.col("residual_score").is_finite().all()).collect().item()
+	)
+
+	deterministic_query_ids = bool(
+		frame.select(
+			(
+				pl.col("query_id")
+				== (
+					pl.col("split")
+					+ pl.lit("_u")
+					+ pl.col("user_idx").cast(pl.Utf8).str.zfill(8)
+				)
+			).all()
+		)
+		.collect()
+		.item()
+	)
+
+	no_leakage = True
+	if leaked_targets is not None:
+		positive_pairs = {
+			(int(user_idx), int(item_idx))
+			for user_idx, item_idx in frame.filter(pl.col("label") == 1)
+			.select(["user_idx", "target_item_idx"])
+			.collect()
+			.iter_rows()
+		}
+		if leaked_targets and all(
+			isinstance(value, tuple) and len(value) == 2 for value in leaked_targets
+		):
+			pair_targets = cast(set[tuple[int, int]], leaked_targets)
+			no_leakage = len(positive_pairs.intersection(pair_targets)) == 0
+		else:
+			target_items = {item_idx for _user_idx, item_idx in positive_pairs}
+			heldout_items = {
+				int(item_idx)
+				for item_idx in leaked_targets
+				if isinstance(item_idx, int)
+			}
+			no_leakage = len(target_items.intersection(heldout_items)) == 0
+
+	checks = {
+		"one_positive_per_query": bool(positives_ok),
+		"no_duplicate_candidate_item_per_query": bool(duplicates_ok),
+		"candidate_set_size_le_201": bool(size_ok),
+		"residual_rank_contiguous_and_stable": bool(rank_ok),
+		"required_columns_non_null": bool(non_null_required_columns),
+		"residual_score_finite": bool(finite_residual_score),
 		"deterministic_query_id": bool(deterministic_query_ids),
 		"no_val_test_target_leakage": bool(no_leakage),
 	}
@@ -476,12 +760,26 @@ def generate_ranker_candidates(
 	ranker_cfg: RankerConfig,
 	*,
 	sample: bool,
+	chunk_size: int = 5000,
+	resume: bool = False,
+	max_users: int | None = None,
+	splits: tuple[str, ...] = ("train", "val", "test"),
+	overwrite: bool = False,
+	progress_every: int = 1000,
 ) -> dict[str, Path]:
 	"""Generate ranker candidates for train/val/test.
 
 	Returns a map containing candidate parquet paths for each split plus a
 	metadata JSON path for each split.
 	"""
+	options = CandidateGenerationOptions(
+		chunk_size=max(int(chunk_size), 1),
+		resume=bool(resume),
+		max_users=max_users,
+		splits=_normalize_splits(splits),
+		overwrite=bool(overwrite),
+		progress_every=max(int(progress_every), 0),
+	)
 
 	retrieval_cfg = load_retrieval_config(ranker_cfg.retriever_config, sample=sample)
 	retrieval_cfg.model.model_type = "residual_transformer"
@@ -511,6 +809,17 @@ def generate_ranker_candidates(
 		history_lookup=history_lookup,
 		history_length=retrieval_cfg.train.history_length,
 	)
+	if options.max_users is not None:
+		limit = max(int(options.max_users), 0)
+		train_queries = train_queries[:limit]
+		val_queries = val_queries[:limit]
+		test_queries = test_queries[:limit]
+
+	queries_by_split: dict[str, list[QueryContext]] = {
+		"train": train_queries,
+		"val": val_queries,
+		"test": test_queries,
+	}
 
 	val_targets = {
 		(int(user_idx), int(item_idx))
@@ -520,109 +829,205 @@ def generate_ranker_candidates(
 		(int(user_idx), int(item_idx))
 		for user_idx, item_idx in test_df.select(["user_idx", "item_idx"]).iter_rows()
 	}
+	leaked_targets = val_targets.union(test_targets)
 
-	train_frame = _build_candidate_frame(
-		train_queries,
-		split="train",
-		top_k=ranker_cfg.candidate_top_k,
-		index=index,
-		item_embeddings=item_embeddings,
-		model=model,
-		tables=tables,
-		history_length=retrieval_cfg.train.history_length,
-		use_embedding_features=ranker_cfg.use_frozen_retrieval_embeddings,
-		device=device,
-	)
-	val_frame = _build_candidate_frame(
-		val_queries,
-		split="val",
-		top_k=ranker_cfg.candidate_top_k,
-		index=index,
-		item_embeddings=item_embeddings,
-		model=model,
-		tables=tables,
-		history_length=retrieval_cfg.train.history_length,
-		use_embedding_features=ranker_cfg.use_frozen_retrieval_embeddings,
-		device=device,
-	)
-	test_frame = _build_candidate_frame(
-		test_queries,
-		split="test",
-		top_k=ranker_cfg.candidate_top_k,
-		index=index,
-		item_embeddings=item_embeddings,
-		model=model,
-		tables=tables,
-		history_length=retrieval_cfg.train.history_length,
-		use_embedding_features=ranker_cfg.use_frozen_retrieval_embeddings,
-		device=device,
-	)
+	scope_dir = ranker_cfg.candidate_dir_for_scope(sample=sample)
+	scope_dir.mkdir(parents=True, exist_ok=True)
+	manifest_path = _manifest_path(ranker_cfg, sample=sample)
 
-	train_checks = validate_candidate_frame(
-		train_frame,
-		split="train",
-		leaked_targets=val_targets.union(test_targets),
-	)
-	val_checks = validate_candidate_frame(val_frame, split="val")
-	test_checks = validate_candidate_frame(test_frame, split="test")
+	if options.overwrite:
+		for split in options.splits:
+			chunk_dir = _chunk_dir(ranker_cfg, sample=sample, split=split)
+			if chunk_dir.exists():
+				shutil.rmtree(chunk_dir)
+			candidate_path = ranker_cfg.candidate_path(split=split, sample=sample)
+			meta_path = candidate_path.with_suffix(".meta.json")
+			if candidate_path.exists():
+				candidate_path.unlink()
+			if meta_path.exists():
+				meta_path.unlink()
+		if manifest_path.exists():
+			manifest_path.unlink()
 
-	train_path = ranker_cfg.candidate_path(split="train", sample=sample)
-	val_path = ranker_cfg.candidate_path(split="val", sample=sample)
-	test_path = ranker_cfg.candidate_path(split="test", sample=sample)
-	_save_frame(train_path, train_frame)
-	_save_frame(val_path, val_frame)
-	_save_frame(test_path, test_frame)
-
-	train_meta_path = train_path.with_suffix(".meta.json")
-	val_meta_path = val_path.with_suffix(".meta.json")
-	test_meta_path = test_path.with_suffix(".meta.json")
-
-	save_json(
-		train_meta_path,
-		{
-			"split": "train",
+	manifest = _load_manifest(manifest_path) if options.resume else {}
+	if not manifest:
+		manifest = {
 			"sample": sample,
-			"query_count": int(train_frame.select(pl.col("query_id").n_unique()).item()),
-			"row_count": int(train_frame.height),
-			"deterministic_signature": _signature(train_frame),
-			"validation_checks": train_checks,
+			"generated_at": _utc_now_iso(),
+			"config_hash": _config_hash(
+				ranker_cfg=ranker_cfg,
+				retrieval_cfg=retrieval_cfg,
+				options=options,
+				sample=sample,
+			),
+			"options": {
+				"chunk_size": options.chunk_size,
+				"resume": options.resume,
+				"max_users": options.max_users,
+				"splits": list(options.splits),
+				"overwrite": options.overwrite,
+				"progress_every": options.progress_every,
+			},
+			"splits": {},
+		}
+	else:
+		manifest["generated_at"] = _utc_now_iso()
+
+	outputs: dict[str, Path] = {}
+	for split in options.splits:
+		queries = queries_by_split[split]
+		output_path = ranker_cfg.candidate_path(split=split, sample=sample)
+		chunk_dir = _chunk_dir(ranker_cfg, sample=sample, split=split)
+		chunk_dir.mkdir(parents=True, exist_ok=True)
+
+		splits_manifest = cast(dict[str, Any], manifest.setdefault("splits", {}))
+		split_manifest = cast(dict[str, Any], splits_manifest.setdefault(split, {}))
+		split_manifest.setdefault("split", split)
+		split_manifest["completed"] = False
+		chunk_entries = cast(list[dict[str, Any]], split_manifest.get("chunks", []))
+		entry_by_index = {
+			int(entry.get("chunk_index", idx)): entry
+			for idx, entry in enumerate(chunk_entries)
+			if isinstance(entry, dict)
+		}
+
+		chunk_files: list[Path] = []
+		chunk_signatures: list[str] = []
+		total_rows = 0
+		processed_queries = 0
+		new_entries: list[dict[str, Any]] = []
+
+		for chunk_index, start_idx in enumerate(range(0, len(queries), options.chunk_size)):
+			end_idx = min(start_idx + options.chunk_size, len(queries))
+			chunk_queries = queries[start_idx:end_idx]
+			if not chunk_queries:
+				continue
+
+			chunk_file = chunk_dir / f"chunk_{chunk_index:06d}.parquet"
+			existing_entry = entry_by_index.get(chunk_index)
+			if (
+				options.resume
+				and existing_entry is not None
+				and bool(existing_entry.get("completed", False))
+				and chunk_file.exists()
+			):
+				row_count = int(existing_entry.get("row_count", 0))
+				query_count = int(existing_entry.get("query_count", len(chunk_queries)))
+				signature = str(existing_entry.get("signature", ""))
+				if not signature:
+					signature = _signature(pl.read_parquet(chunk_file))
+				total_rows += row_count
+				processed_queries += query_count
+				chunk_files.append(chunk_file)
+				chunk_signatures.append(signature)
+				new_entries.append(existing_entry)
+				if options.progress_every > 0 and processed_queries % options.progress_every == 0:
+					_emit_progress(
+						split=split,
+						processed_queries=processed_queries,
+						total_queries=len(queries),
+						candidates_written=total_rows,
+						elapsed_seconds=1.0,
+						output_path=output_path,
+					)
+				continue
+
+			chunk_frame = _build_candidate_frame(
+				chunk_queries,
+				split=split,
+				top_k=ranker_cfg.candidate_top_k,
+				index=index,
+				item_embeddings=item_embeddings,
+				model=model,
+				tables=tables,
+				history_length=retrieval_cfg.train.history_length,
+				use_embedding_features=ranker_cfg.use_frozen_retrieval_embeddings,
+				device=device,
+				progress_every=options.progress_every,
+				output_path=chunk_file,
+			)
+			_save_frame(chunk_file, chunk_frame)
+
+			row_count = int(chunk_frame.height)
+			query_count = len(chunk_queries)
+			signature = _signature(chunk_frame)
+			total_rows += row_count
+			processed_queries += query_count
+			chunk_files.append(chunk_file)
+			chunk_signatures.append(signature)
+
+			start_user_idx = min(query.user_idx for query in chunk_queries)
+			end_user_idx = max(query.user_idx for query in chunk_queries)
+			new_entries.append(
+				{
+					"chunk_index": chunk_index,
+					"file": str(chunk_file),
+					"row_count": row_count,
+					"query_count": query_count,
+					"start_user_idx": int(start_user_idx),
+					"end_user_idx": int(end_user_idx),
+					"signature": signature,
+					"completed": True,
+					"generated_at": _utc_now_iso(),
+				}
+			)
+
+			split_manifest["chunks"] = sorted(
+				new_entries,
+				key=lambda entry: int(entry["chunk_index"]),
+			)
+			split_manifest["row_count"] = int(total_rows)
+			split_manifest["query_count"] = int(processed_queries)
+			split_manifest["completed"] = False
+			_save_manifest(manifest_path, manifest)
+
+		if not chunk_files:
+			msg = f"No chunk files generated for split '{split}'"
+			raise ValueError(msg)
+
+		chunk_files_sorted = sorted(chunk_files, key=lambda path: path.name)
+		_merge_chunks(chunk_files_sorted, output_path=output_path)
+
+		checks = validate_candidate_path(
+			output_path,
+			split=split,
+			leaked_targets=leaked_targets if split == "train" else None,
+		)
+		split_signature = hashlib.sha256(
+			"".join(chunk_signatures).encode("utf-8")
+		).hexdigest()
+		meta_path = output_path.with_suffix(".meta.json")
+		meta_payload: dict[str, Any] = {
+			"split": split,
+			"sample": sample,
+			"query_count": int(len(queries)),
+			"row_count": int(total_rows),
+			"deterministic_signature": split_signature,
+			"validation_checks": checks,
 			"required_columns": REQUIRED_CANDIDATE_COLUMNS,
 			"embedding_feature_columns": EMBEDDING_FEATURE_COLUMNS,
-		},
-	)
-	save_json(
-		val_meta_path,
-		{
-			"split": "val",
-			"sample": sample,
-			"query_count": int(val_frame.select(pl.col("query_id").n_unique()).item()),
-			"row_count": int(val_frame.height),
-			"deterministic_signature": _signature(val_frame),
-			"validation_checks": val_checks,
-			"required_columns": REQUIRED_CANDIDATE_COLUMNS,
-			"embedding_feature_columns": EMBEDDING_FEATURE_COLUMNS,
-		},
-	)
-	save_json(
-		test_meta_path,
-		{
-			"split": "test",
-			"sample": sample,
-			"query_count": int(test_frame.select(pl.col("query_id").n_unique()).item()),
-			"row_count": int(test_frame.height),
-			"deterministic_signature": _signature(test_frame),
-			"validation_checks": test_checks,
-			"required_columns": REQUIRED_CANDIDATE_COLUMNS,
-			"embedding_feature_columns": EMBEDDING_FEATURE_COLUMNS,
-			"test_history_policy": "train_history_only_matches_retrieval_evaluator",
-		},
-	)
+		}
+		if split == "test":
+			meta_payload["test_history_policy"] = (
+				"train_history_only_matches_retrieval_evaluator"
+			)
+		save_json(meta_path, meta_payload)
 
-	return {
-		"train_candidates": train_path,
-		"val_candidates": val_path,
-		"test_candidates": test_path,
-		"train_meta": train_meta_path,
-		"val_meta": val_meta_path,
-		"test_meta": test_meta_path,
-	}
+		split_manifest["chunks"] = sorted(
+			new_entries,
+			key=lambda entry: int(entry["chunk_index"]),
+		)
+		split_manifest["row_count"] = int(total_rows)
+		split_manifest["query_count"] = int(len(queries))
+		split_manifest["output_path"] = str(output_path)
+		split_manifest["meta_path"] = str(meta_path)
+		split_manifest["deterministic_signature"] = split_signature
+		split_manifest["completed"] = True
+		split_manifest["generated_at"] = _utc_now_iso()
+		_save_manifest(manifest_path, manifest)
+
+		outputs[f"{split}_candidates"] = output_path
+		outputs[f"{split}_meta"] = meta_path
+
+	outputs["manifest"] = manifest_path
+	return outputs

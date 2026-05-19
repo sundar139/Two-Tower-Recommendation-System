@@ -5,7 +5,11 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from movie_recsys.ranking.features import MANDATORY_FEATURE_COLUMNS, _build_split_features
+from movie_recsys.ranking.features import (
+	MANDATORY_FEATURE_COLUMNS,
+	_build_split_features,
+	_limit_train_negatives,
+)
 
 
 def _candidate_fixture() -> pl.DataFrame:
@@ -61,7 +65,7 @@ def _items_fixture() -> pl.DataFrame:
 
 
 def test_feature_generation_required_columns_and_no_nulls() -> None:
-	frame, _feature_columns = _build_split_features(
+	frame, feature_columns = _build_split_features(
 		candidates=_candidate_fixture(),
 		users_df=_users_fixture(),
 		items_df=_items_fixture(),
@@ -78,6 +82,16 @@ def test_feature_generation_required_columns_and_no_nulls() -> None:
 		]
 	).row(0)
 	assert all(not bool(value) for value in null_checks)
+
+	for blocked in [
+		"target_injected",
+		"candidate_source",
+		"target_item_idx",
+		"label",
+		"query_id",
+		"split",
+	]:
+		assert blocked not in feature_columns
 
 
 def test_feature_generation_genre_overlap_fixture() -> None:
@@ -100,16 +114,73 @@ def test_feature_generation_genre_overlap_fixture() -> None:
 
 
 def test_feature_generation_is_deterministic() -> None:
-	first, _ = _build_split_features(
+	first, first_features = _build_split_features(
 		candidates=_candidate_fixture(),
 		users_df=_users_fixture(),
 		items_df=_items_fixture(),
 		use_frozen_features=False,
 	)
-	second, _ = _build_split_features(
+	second, second_features = _build_split_features(
 		candidates=_candidate_fixture(),
 		users_df=_users_fixture(),
 		items_df=_items_fixture(),
 		use_frozen_features=False,
 	)
 	assert first.equals(second)
+	assert first_features == second_features
+
+
+def test_feature_allowlist_is_explicit_and_stable() -> None:
+	frame, feature_columns = _build_split_features(
+		candidates=_candidate_fixture(),
+		users_df=_users_fixture(),
+		items_df=_items_fixture(),
+		use_frozen_features=False,
+	)
+
+	assert feature_columns == sorted(feature_columns)
+	assert "residual_score" in feature_columns
+	assert "residual_rank" in feature_columns
+	assert "genre_affinity_dot" in feature_columns
+	assert "score_rank_interaction" in feature_columns
+
+	metadata_only = {
+		"query_id",
+		"split",
+		"label",
+		"target_item_idx",
+		"candidate_source",
+		"target_injected",
+	}
+	assert metadata_only.isdisjoint(set(feature_columns))
+	assert metadata_only.issubset(set(frame.columns))
+
+
+def test_limit_train_negatives_keeps_positive_plus_top_k_negatives() -> None:
+	candidates = pl.DataFrame(
+		{
+			"query_id": ["q1", "q1", "q1", "q1", "q1", "q2", "q2", "q2", "q2"],
+			"item_idx": [10, 20, 30, 40, 50, 11, 21, 31, 41],
+			"label": [1, 0, 0, 0, 0, 1, 0, 0, 0],
+			"residual_rank": [1, 2, 3, 4, 5, 1, 2, 3, 4],
+		}
+	)
+
+	limited = _limit_train_negatives(candidates, negatives_per_positive=2)
+	counts = limited.group_by("query_id").len().sort("query_id")
+	assert counts.get_column("len").to_list() == [3, 3]
+
+	q1_items = (
+		limited.filter(pl.col("query_id") == "q1")
+		.sort("residual_rank")
+		.get_column("item_idx")
+		.to_list()
+	)
+	q2_items = (
+		limited.filter(pl.col("query_id") == "q2")
+		.sort("residual_rank")
+		.get_column("item_idx")
+		.to_list()
+	)
+	assert q1_items == [10, 20, 30]
+	assert q2_items == [11, 21, 31]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import polars as pl
@@ -29,6 +30,50 @@ MANDATORY_FEATURE_COLUMNS = [
 	"user_item_popularity_gap",
 	"user_item_year_distance",
 ]
+
+METADATA_ONLY_COLUMNS = {
+	"query_id",
+	"user_idx",
+	"item_idx",
+	"split",
+	"label",
+	"target_item_idx",
+	"candidate_source",
+	"target_injected",
+	"timestamp_context",
+	"user_history_length",
+}
+
+FIXED_MODEL_FEATURE_COLUMNS = {
+	"residual_score",
+	"residual_rank",
+	"reciprocal_rank",
+	"score_rank_interaction",
+	"user_item_popularity_gap",
+	"user_item_year_distance",
+	"positive_rating_count",
+	"total_rating_count",
+	"mean_rating",
+	"activity_span_days",
+	"tag_count",
+	"rating_count",
+	"positive_count",
+	"popularity_score",
+	"release_year",
+	"release_year_norm",
+	"year_bucket",
+	"genome_tag_count",
+	"genome_relevance_mean",
+	"genome_relevance_max",
+	"genre_affinity_dot",
+	"genre_overlap_count",
+	"max_genre_affinity",
+}
+
+PREFIX_MODEL_FEATURE_ALLOWLIST = (
+	"genre_affinity_",
+	"item_genre_",
+)
 
 
 def _candidate_paths(cfg: RankerConfig, *, sample: bool) -> dict[str, Path]:
@@ -146,6 +191,32 @@ def _sanitize_numeric(frame: pl.DataFrame) -> pl.DataFrame:
 	return frame.with_columns(expressions)
 
 
+def _is_allowed_model_feature(name: str, *, use_frozen_features: bool) -> bool:
+	if name in METADATA_ONLY_COLUMNS:
+		return False
+	if name in FIXED_MODEL_FEATURE_COLUMNS:
+		return True
+	if any(name.startswith(prefix) for prefix in PREFIX_MODEL_FEATURE_ALLOWLIST):
+		return True
+	return use_frozen_features and name in EMBEDDING_FEATURE_COLUMNS
+
+
+def resolve_feature_allowlist(
+	frame: pl.DataFrame,
+	*,
+	use_frozen_features: bool,
+) -> list[str]:
+	"""Return deterministic model feature columns from an explicit allowlist."""
+
+	selected = [
+		name
+		for name, dtype in frame.schema.items()
+		if dtype.is_numeric()
+		and _is_allowed_model_feature(name, use_frozen_features=use_frozen_features)
+	]
+	return sorted(selected)
+
+
 def validate_feature_frame(frame: pl.DataFrame, *, split: str) -> None:
 	missing = [name for name in MANDATORY_FEATURE_COLUMNS if name not in frame.columns]
 	if missing:
@@ -171,12 +242,40 @@ def validate_feature_frame(frame: pl.DataFrame, *, split: str) -> None:
 
 
 def _signature(frame: pl.DataFrame) -> str:
-	payload = (
-		frame.select(["query_id", "item_idx", "label", "residual_rank"]).sort(
-			["query_id", "residual_rank", "item_idx"]
-		)
-	).write_json()
+	hash_a = pl.struct(["query_id", "item_idx", "label", "residual_rank"]).hash(seed=17)
+	hash_b = pl.struct(["query_id", "item_idx", "label", "residual_rank"]).hash(seed=53)
+	summary = frame.select(
+		[
+			pl.len().alias("row_count"),
+			pl.col("query_id").n_unique().alias("query_count"),
+			hash_a.sum().alias("hash_a_sum"),
+			hash_b.sum().alias("hash_b_sum"),
+			hash_a.min().alias("hash_a_min"),
+			hash_a.max().alias("hash_a_max"),
+		]
+	).row(0, named=True)
+	payload = json.dumps(summary, sort_keys=True)
 	return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _limit_train_negatives(
+	candidates: pl.DataFrame,
+	*,
+	negatives_per_positive: int,
+) -> pl.DataFrame:
+	if negatives_per_positive <= 0:
+		return candidates
+
+	positives = candidates.filter(pl.col("label") == 1)
+	negatives = (
+		candidates.filter(pl.col("label") == 0)
+		.sort(["query_id", "residual_rank", "item_idx"])
+		.group_by("query_id", maintain_order=True)
+		.head(negatives_per_positive)
+	)
+	return pl.concat([positives, negatives], how="vertical").sort(
+		["query_id", "residual_rank", "item_idx"]
+	)
 
 
 def _build_split_features(
@@ -270,11 +369,19 @@ def _build_split_features(
 		"timestamp_context",
 		"user_history_length",
 	}
-	feature_columns = [
-		name
-		for name, dtype in feature_frame.schema.items()
-		if dtype.is_numeric() and name not in metadata_cols
-	]
+	feature_columns = resolve_feature_allowlist(
+		feature_frame,
+		use_frozen_features=use_frozen_features,
+	)
+
+	# Defensive check: explicit allowlist should never include metadata-only columns.
+	invalid_feature_columns = sorted(set(feature_columns).intersection(metadata_cols))
+	if invalid_feature_columns:
+		msg = (
+			"Feature allowlist unexpectedly included metadata-only columns: "
+			f"{', '.join(invalid_feature_columns)}"
+		)
+		raise ValueError(msg)
 
 	return feature_frame, sorted(feature_columns)
 
@@ -294,6 +401,12 @@ def build_ranker_features(
 	outputs: dict[str, Path] = {}
 	for split in ["train", "val", "test"]:
 		candidates = pl.read_parquet(candidate_paths[split])
+		rows_before_sampling = int(candidates.height)
+		if split == "train":
+			candidates = _limit_train_negatives(
+				candidates,
+				negatives_per_positive=ranker_cfg.negative_samples_per_positive,
+			)
 		feature_frame, feature_columns = _build_split_features(
 			candidates=candidates,
 			users_df=users_df,
@@ -312,8 +425,12 @@ def build_ranker_features(
 			{
 				"split": split,
 				"sample": sample,
+				"rows_before_sampling": rows_before_sampling,
 				"row_count": int(feature_frame.height),
 				"query_count": int(feature_frame.select(pl.col("query_id").n_unique()).item()),
+				"negative_samples_per_positive": (
+					ranker_cfg.negative_samples_per_positive if split == "train" else None
+				),
 				"feature_columns": feature_columns,
 				"deterministic_signature": _signature(feature_frame),
 				"mandatory_columns": MANDATORY_FEATURE_COLUMNS,
