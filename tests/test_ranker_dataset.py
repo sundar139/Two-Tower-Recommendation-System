@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
-from movie_recsys.ranking.dataset import RankerDataset, collate_ranker_batch
+from movie_recsys.ranking.dataset import (
+	RankerDataset,
+	collate_ranker_batch,
+	iter_ranker_feature_batches,
+)
 
 
 def _feature_frame() -> pl.DataFrame:
@@ -51,3 +56,49 @@ def test_ranker_dataset_collate_shapes(tmp_path) -> None:
 	assert tuple(batch["features"].shape) == (2, 2)
 	assert tuple(batch["labels"].shape) == (2,)
 	assert len(batch["query_ids"]) == 2
+
+
+def test_streaming_feature_batches_do_not_depend_on_polars_read_parquet(
+	tmp_path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	shard_a = tmp_path / "part_000000.parquet"
+	shard_b = tmp_path / "part_000001.parquet"
+
+	pl.DataFrame(
+		{
+			"query_id": ["q1", "q1"],
+			"item_idx": [11, 12],
+			"target_item_idx": [11, 11],
+			"residual_score": [0.9, 0.8],
+			"residual_rank": [1, 2],
+			"label": [1, 0],
+		}
+	).write_parquet(shard_a)
+	pl.DataFrame(
+		{
+			"query_id": ["q2"],
+			"item_idx": [21],
+			"target_item_idx": [21],
+			"residual_score": [0.7],
+			"residual_rank": [1],
+			"label": [1],
+		}
+	).write_parquet(shard_b)
+
+	def _fail_read_parquet(*_args, **_kwargs):
+		raise AssertionError("iter_ranker_feature_batches should not call polars.read_parquet")
+
+	monkeypatch.setattr(pl, "read_parquet", _fail_read_parquet)
+
+	rows = 0
+	for batch in iter_ranker_feature_batches(
+		[str(shard_a), str(shard_b)],
+		feature_columns=["residual_score", "residual_rank"],
+		batch_size=2,
+		shuffle=False,
+		seed=7,
+	):
+		rows += int(batch["features"].shape[0])
+
+	assert rows == 3
