@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from movie_recsys import __version__
 from movie_recsys.serving.config import ServingConfig, load_serving_config
@@ -19,15 +20,27 @@ from movie_recsys.serving.schemas import (
     RecommendRequest,
     RecommendResponse,
 )
+from movie_recsys.serving.telemetry import get_logger, log_event
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     config: ServingConfig = load_serving_config()
     registry = ArtifactRegistry(config)
+    logger = get_logger()
+
     app.state.serving_config = config
     app.state.artifact_registry = registry
     app.state.recommendation_service = RecommendationService(registry)
+    app.state.startup_error = None
+
+    try:
+        registry.load()
+        log_event(logger, "serving_startup", ready=True)
+    except Exception as exc:  # noqa: BLE001
+        app.state.startup_error = str(exc)
+        log_event(logger, "serving_startup", ready=False, error=str(exc))
+
     yield
 
 
@@ -36,12 +49,26 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Movie Recommender API", version=__version__, lifespan=_lifespan)
 
+    @app.exception_handler(ServingError)
+    async def serving_error_handler(
+        _request: Request,
+        exc: ServingError,
+    ) -> JSONResponse:
+        http_exc = to_http_exception(exc)
+        return JSONResponse(status_code=http_exc.status_code, content={"detail": http_exc.detail})
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/readyz", response_model=ReadinessResponse)
-    def readyz(registry: ArtifactRegistry = Depends(get_registry)) -> ReadinessResponse:
+    def readyz(
+        request: Request,
+        registry: ArtifactRegistry = Depends(get_registry),
+    ) -> ReadinessResponse:
+        startup_error = getattr(request.app.state, "startup_error", None)
+        if startup_error:
+            return ReadinessResponse(status="not_ready", ready=False)
         return ReadinessResponse(
             status="ready" if registry.is_ready() else "starting",
             ready=registry.is_ready(),
@@ -52,10 +79,7 @@ def create_app() -> FastAPI:
         request: RecommendRequest,
         service: RecommendationService = Depends(get_recommendation_service),
     ) -> RecommendResponse:
-        try:
-            rows = service.recommend(user_idx=request.user_idx, top_k=request.top_k)
-        except ServingError as exc:
-            raise to_http_exception(exc) from exc
+        rows = service.recommend(user_idx=request.user_idx, top_k=request.top_k)
 
         items = [
             RecommendationItem(
@@ -70,7 +94,7 @@ def create_app() -> FastAPI:
         return RecommendResponse(
             user_idx=request.user_idx,
             top_k=request.top_k,
-            total_candidates=len(items),
+            total_candidates=len(rows),
             recommendations=items,
         )
 
