@@ -29,6 +29,10 @@ RANKER_PLUS_POPULARITY_BETA_VALUES = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
 RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_ALPHA_VALUES = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
 RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_BETA_VALUES = [0.2, 0.5, 1.0, 1.5, 2.0]
 RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES = [0.0, 0.05, 0.1, 0.2]
+TWO_STAGE_TOP_K_FOCUS_VALUES = [10, 20, 30, 50]
+TWO_STAGE_ALPHA = 1.0
+TWO_STAGE_BETA = 0.1
+TWO_STAGE_GAMMA = 0.0
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -172,6 +176,12 @@ def build_selection_payload(
                 "alpha_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_ALPHA_VALUES,
                 "beta_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_BETA_VALUES,
                 "gamma_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES,
+            },
+            "ranker_topk_popularity_backfill": {
+                "top_k_focus_values": TWO_STAGE_TOP_K_FOCUS_VALUES,
+                "alpha": TWO_STAGE_ALPHA,
+                "beta": TWO_STAGE_BETA,
+                "gamma": TWO_STAGE_GAMMA,
             },
         },
         "validation_results": _serialize_evaluations(val_results),
@@ -336,6 +346,10 @@ def main(
         ranker_plus_popularity_plus_residual_gamma_values=(
             RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES
         ),
+        two_stage_top_k_focus_values=TWO_STAGE_TOP_K_FOCUS_VALUES,
+        two_stage_alpha=TWO_STAGE_ALPHA,
+        two_stage_beta=TWO_STAGE_BETA,
+        two_stage_gamma=TWO_STAGE_GAMMA,
     )
 
     val_results, val_counts = evaluate_policy_grid(

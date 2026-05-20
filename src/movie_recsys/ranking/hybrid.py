@@ -49,6 +49,7 @@ class PolicySpec:
     alpha: float | None = None
     beta: float | None = None
     gamma: float | None = None
+    top_k_focus: int | None = None
 
     @property
     def policy_id(self) -> str:
@@ -62,6 +63,8 @@ class PolicySpec:
             parts.append(f"b={_format_weight(self.beta)}")
         if self.gamma is not None:
             parts.append(f"g={_format_weight(self.gamma)}")
+        if self.top_k_focus is not None:
+            parts.append(f"topk={int(self.top_k_focus)}")
         return "|".join(parts)
 
     def as_dict(self) -> dict[str, Any]:
@@ -71,6 +74,7 @@ class PolicySpec:
             "alpha": self.alpha,
             "beta": self.beta,
             "gamma": self.gamma,
+            "top_k_focus": self.top_k_focus,
             "ranker_weight": float(self.ranker_weight),
             "popularity_weight": float(self.popularity_weight),
             "residual_weight": float(self.residual_weight),
@@ -103,6 +107,10 @@ def build_policy_grid(
     ranker_plus_popularity_plus_residual_alpha_values: Sequence[float],
     ranker_plus_popularity_plus_residual_beta_values: Sequence[float],
     ranker_plus_popularity_plus_residual_gamma_values: Sequence[float],
+    two_stage_top_k_focus_values: Sequence[int] = (),
+    two_stage_alpha: float = 1.0,
+    two_stage_beta: float = 0.1,
+    two_stage_gamma: float = 0.0,
 ) -> list[PolicySpec]:
     """Build manual scorer-policy grid (no automated search)."""
 
@@ -155,6 +163,20 @@ def build_policy_grid(
                         gamma=float(gamma),
                     )
                 )
+
+    for top_k_focus in two_stage_top_k_focus_values:
+        grid.append(
+            PolicySpec(
+                policy_name="ranker_topk_popularity_backfill",
+                ranker_weight=float(two_stage_alpha),
+                popularity_weight=float(two_stage_beta),
+                residual_weight=float(two_stage_gamma),
+                alpha=float(two_stage_alpha),
+                beta=float(two_stage_beta),
+                gamma=float(two_stage_gamma),
+                top_k_focus=int(top_k_focus),
+            )
+        )
 
     return grid
 
@@ -432,14 +454,21 @@ def evaluate_policy_grid(
         msg = f"Missing required columns in scored candidates: {', '.join(sorted(missing))}"
         raise ValueError(msg)
 
-    weights = np.asarray(
-        [
-            [policy.ranker_weight, policy.popularity_weight, policy.residual_weight]
-            for policy in policies
-        ],
-        dtype=np.float64,
-    )
-    n_policies = int(weights.shape[0])
+    linear_policy_indices: list[int] = []
+    two_stage_policy_indices: list[int] = []
+    linear_weights_rows: list[list[float]] = []
+    for index, policy in enumerate(policies):
+        if policy.policy_name == "ranker_topk_popularity_backfill":
+            two_stage_policy_indices.append(index)
+        else:
+            linear_policy_indices.append(index)
+            linear_weights_rows.append(
+                [policy.ranker_weight, policy.popularity_weight, policy.residual_weight]
+            )
+
+    n_policies = int(len(policies))
+    linear_policy_indices_arr = np.asarray(linear_policy_indices, dtype=np.int64)
+    linear_weights = np.asarray(linear_weights_rows, dtype=np.float64)
 
     hr_sum = np.zeros(n_policies, dtype=np.float64)
     mrr_sum = np.zeros(n_policies, dtype=np.float64)
@@ -475,7 +504,6 @@ def evaluate_policy_grid(
         residual_norm = normalize_query_scores(residual_raw, method=normalization_method)
 
         base_scores = np.column_stack((ranker_norm, popularity_norm, residual_norm))
-        combined_scores = np.matmul(base_scores, weights.T)
 
         labels = np.asarray(group.get_column("label").to_numpy(), dtype=np.int64)
         item_idx = np.asarray(group.get_column("item_idx").to_numpy(), dtype=np.int64)
@@ -495,25 +523,72 @@ def evaluate_policy_grid(
                 raise ValueError(msg)
             positive_index = int(target_matches[0])
 
-        positive_scores = combined_scores[positive_index, :]
         positive_residual_rank = int(residual_rank[positive_index])
         positive_item_idx = int(item_idx[positive_index])
 
-        higher = combined_scores > positive_scores
-        ties = combined_scores == positive_scores
-        tie_break = (residual_rank[:, None] < positive_residual_rank) | (
-            (residual_rank[:, None] == positive_residual_rank)
-            & (item_idx[:, None] < positive_item_idx)
-        )
-        better = higher | (ties & tie_break)
-        ranks = np.sum(better, axis=0) + 1
+        if linear_policy_indices:
+            combined_scores = np.matmul(base_scores, linear_weights.T)
+            positive_scores = combined_scores[positive_index, :]
 
-        hit_at_10 = ranks <= 10
-        hit_at_50 = ranks <= 50
-        hr_sum += hit_at_10.astype(np.float64)
-        mrr_sum += np.where(hit_at_10, 1.0 / ranks, 0.0)
-        ndcg_sum += np.where(hit_at_10, 1.0 / np.log2(ranks + 1.0), 0.0)
-        recall_sum += hit_at_50.astype(np.float64)
+            higher = combined_scores > positive_scores
+            ties = combined_scores == positive_scores
+            tie_break = (residual_rank[:, None] < positive_residual_rank) | (
+                (residual_rank[:, None] == positive_residual_rank)
+                & (item_idx[:, None] < positive_item_idx)
+            )
+            better = higher | (ties & tie_break)
+            ranks = np.sum(better, axis=0) + 1
+
+            hit_at_10 = ranks <= 10
+            hit_at_50 = ranks <= 50
+            hr_sum[linear_policy_indices_arr] += hit_at_10.astype(np.float64)
+            mrr_sum[linear_policy_indices_arr] += np.where(hit_at_10, 1.0 / ranks, 0.0)
+            ndcg_sum[linear_policy_indices_arr] += np.where(
+                hit_at_10,
+                1.0 / np.log2(ranks + 1.0),
+                0.0,
+            )
+            recall_sum[linear_policy_indices_arr] += hit_at_50.astype(np.float64)
+
+        for policy_index in two_stage_policy_indices:
+            policy = policies[policy_index]
+            hybrid_scores = (
+                base_scores[:, 0] * float(policy.ranker_weight)
+                + base_scores[:, 1] * float(policy.popularity_weight)
+                + base_scores[:, 2] * float(policy.residual_weight)
+            )
+
+            stage_one_order = np.lexsort((item_idx, residual_rank, -hybrid_scores))
+            top_k_focus = int(policy.top_k_focus or 0)
+            top_k_focus = max(0, min(top_k_focus, int(stage_one_order.size)))
+            focused_indices = stage_one_order[:top_k_focus]
+
+            if top_k_focus < int(stage_one_order.size):
+                remaining_mask = np.ones(int(stage_one_order.size), dtype=bool)
+                if focused_indices.size > 0:
+                    remaining_mask[focused_indices] = False
+                remaining_indices = np.flatnonzero(remaining_mask)
+                remaining_sorted = remaining_indices[
+                    np.lexsort(
+                        (
+                            item_idx[remaining_indices],
+                            residual_rank[remaining_indices],
+                            -popularity_raw[remaining_indices],
+                        )
+                    )
+                ]
+                final_order = np.concatenate((focused_indices, remaining_sorted))
+            else:
+                final_order = focused_indices
+
+            rank_position = int(np.flatnonzero(final_order == positive_index)[0]) + 1
+
+            if rank_position <= 10:
+                hr_sum[policy_index] += 1.0
+                mrr_sum[policy_index] += 1.0 / float(rank_position)
+                ndcg_sum[policy_index] += 1.0 / float(np.log2(rank_position + 1.0))
+            if rank_position <= 50:
+                recall_sum[policy_index] += 1.0
 
     if query_count <= 0:
         msg = "No query groups were evaluated"
