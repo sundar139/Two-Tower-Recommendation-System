@@ -47,7 +47,7 @@ def invalid_top_k(*, top_k: int, min_allowed: int, max_allowed: int) -> ServingE
             f"received {top_k}"
         ),
         code="invalid_top_k",
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
     )
 
 
