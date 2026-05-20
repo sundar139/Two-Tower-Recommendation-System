@@ -15,7 +15,7 @@ class ServingPathsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    retrieval_config: Path = Path("configs/retrieval_sample_stronger.yaml")
+    retrieval_config: Path = Path("configs/transformer_retrieval_residual.yaml")
     ranker_config: Path = Path("configs/ranker.yaml")
     faiss_dir: Path = Path("artifacts/faiss")
     residual_checkpoint: Path = Path(
@@ -99,7 +99,7 @@ def load_serving_config(config_path: str | Path = "configs/serving.yaml") -> Ser
         raise ValueError(msg)
     paths = ServingPathsConfig(
         retrieval_config=_resolve_path(
-            paths_raw.get("retrieval_config", "configs/retrieval_sample_stronger.yaml")
+            paths_raw.get("retrieval_config", "configs/transformer_retrieval_residual.yaml")
         ),
         ranker_config=_resolve_path(paths_raw.get("ranker_config", "configs/ranker.yaml")),
         faiss_dir=_resolve_path(paths_raw.get("faiss_dir", "artifacts/faiss")),
