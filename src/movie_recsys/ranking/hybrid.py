@@ -98,9 +98,11 @@ def _format_weight(value: float) -> str:
 
 def build_policy_grid(
     *,
-    alpha_values: Sequence[float],
-    beta_values: Sequence[float],
-    gamma_values: Sequence[float],
+    ranker_plus_popularity_alpha_values: Sequence[float],
+    ranker_plus_popularity_beta_values: Sequence[float],
+    ranker_plus_popularity_plus_residual_alpha_values: Sequence[float],
+    ranker_plus_popularity_plus_residual_beta_values: Sequence[float],
+    ranker_plus_popularity_plus_residual_gamma_values: Sequence[float],
 ) -> list[PolicySpec]:
     """Build manual scorer-policy grid (no automated search)."""
 
@@ -125,8 +127,8 @@ def build_policy_grid(
         ),
     ]
 
-    for alpha in alpha_values:
-        for beta in beta_values:
+    for alpha in ranker_plus_popularity_alpha_values:
+        for beta in ranker_plus_popularity_beta_values:
             grid.append(
                 PolicySpec(
                     policy_name="ranker_plus_popularity",
@@ -139,23 +141,9 @@ def build_policy_grid(
                 )
             )
 
-    for alpha in alpha_values:
-        for beta in beta_values:
-            grid.append(
-                PolicySpec(
-                    policy_name="ranker_plus_residual",
-                    ranker_weight=float(alpha),
-                    popularity_weight=0.0,
-                    residual_weight=float(beta),
-                    alpha=float(alpha),
-                    beta=float(beta),
-                    gamma=0.0,
-                )
-            )
-
-    for alpha in alpha_values:
-        for beta in beta_values:
-            for gamma in gamma_values:
+    for alpha in ranker_plus_popularity_plus_residual_alpha_values:
+        for beta in ranker_plus_popularity_plus_residual_beta_values:
+            for gamma in ranker_plus_popularity_plus_residual_gamma_values:
                 grid.append(
                     PolicySpec(
                         policy_name="ranker_plus_popularity_plus_residual",

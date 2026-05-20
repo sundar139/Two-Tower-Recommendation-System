@@ -24,9 +24,11 @@ from movie_recsys.ranking.hybrid import (
 
 app = typer.Typer(add_completion=False)
 
-ALPHA_VALUES = [0.5, 0.7, 0.85, 1.0]
-BETA_VALUES = [0.0, 0.1, 0.2, 0.3, 0.5]
-GAMMA_VALUES = [0.0, 0.1, 0.2, 0.3]
+RANKER_PLUS_POPULARITY_ALPHA_VALUES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0]
+RANKER_PLUS_POPULARITY_BETA_VALUES = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
+RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_ALPHA_VALUES = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_BETA_VALUES = [0.2, 0.5, 1.0, 1.5, 2.0]
+RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES = [0.0, 0.05, 0.1, 0.2]
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -162,9 +164,15 @@ def build_selection_payload(
             "selected_test_metrics_finite": metrics_are_finite(selected_test_metrics),
         },
         "grid": {
-            "alpha_values": ALPHA_VALUES,
-            "beta_values": BETA_VALUES,
-            "gamma_values": GAMMA_VALUES,
+            "ranker_plus_popularity": {
+                "alpha_values": RANKER_PLUS_POPULARITY_ALPHA_VALUES,
+                "beta_values": RANKER_PLUS_POPULARITY_BETA_VALUES,
+            },
+            "ranker_plus_popularity_plus_residual": {
+                "alpha_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_ALPHA_VALUES,
+                "beta_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_BETA_VALUES,
+                "gamma_values": RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES,
+            },
         },
         "validation_results": _serialize_evaluations(val_results),
         "selected_scorer": selected_payload,
@@ -317,9 +325,17 @@ def main(
         raise ValueError(msg)
 
     policies = build_policy_grid(
-        alpha_values=ALPHA_VALUES,
-        beta_values=BETA_VALUES,
-        gamma_values=GAMMA_VALUES,
+        ranker_plus_popularity_alpha_values=RANKER_PLUS_POPULARITY_ALPHA_VALUES,
+        ranker_plus_popularity_beta_values=RANKER_PLUS_POPULARITY_BETA_VALUES,
+        ranker_plus_popularity_plus_residual_alpha_values=(
+            RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_ALPHA_VALUES
+        ),
+        ranker_plus_popularity_plus_residual_beta_values=(
+            RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_BETA_VALUES
+        ),
+        ranker_plus_popularity_plus_residual_gamma_values=(
+            RANKER_PLUS_POPULARITY_PLUS_RESIDUAL_GAMMA_VALUES
+        ),
     )
 
     val_results, val_counts = evaluate_policy_grid(
