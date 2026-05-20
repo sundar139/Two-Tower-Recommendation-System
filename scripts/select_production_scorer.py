@@ -17,6 +17,7 @@ from movie_recsys.ranking.hybrid import (
     evaluate_policy_grid,
     metadata_feature_leakage_audit,
     metrics_are_finite,
+    pareto_frontier,
     query_row_counts,
     score_columns_are_finite,
     select_recall_constrained_policy,
@@ -112,6 +113,10 @@ def _serialize_evaluations(results: list[PolicyEvaluation]) -> list[dict[str, An
     ]
 
 
+def _top_n_evaluations(results: list[PolicyEvaluation], *, n: int = 20) -> list[dict[str, Any]]:
+    return _serialize_evaluations(results)[:n]
+
+
 def build_selection_payload(
     *,
     normalization_method: str,
@@ -185,7 +190,19 @@ def build_selection_payload(
             },
         },
         "validation_results": _serialize_evaluations(val_results),
+        "top20_by_val_ndcg": _top_n_evaluations(val_results, n=20),
+        "top20_recall_valid_by_val_ndcg": _top_n_evaluations(recall_valid_results, n=20),
+        "pareto_frontier": _top_n_evaluations(
+            list(pareto_frontier(val_results)),
+            n=20,
+        ),
         "selected_scorer": selected_payload,
+        "selected_beats_popularity_ndcg_val": bool(
+            selected_val_result.metrics["ndcg@10"] > baseline_val["popularity"]["ndcg@10"]
+        ),
+        "selected_preserves_recall_constraint_val": bool(
+            selected_val_result.metrics["recall@50"] >= recall_constraint_value
+        ),
         "baseline_metrics": {
             "val": baseline_val,
             "test": baseline_test,
@@ -234,6 +251,10 @@ def _selection_markdown(payload: dict[str, Any]) -> str:
         f"- alpha: {selected['alpha']}",
         f"- beta: {selected['beta']}",
         f"- gamma: {selected['gamma']}",
+        f"- top_k_focus: {selected['top_k_focus']}",
+        f"- beats_popularity_ndcg_val: {payload['selected_beats_popularity_ndcg_val']}",
+        "- preserves_recall_constraint_val: "
+        f"{payload['selected_preserves_recall_constraint_val']}",
         "",
         "### Validation Metrics",
         "",
@@ -277,6 +298,81 @@ def _selection_markdown(payload: dict[str, Any]) -> str:
             f"{metrics['mrr@10']:.6f} | "
             f"{metrics['ndcg@10']:.6f} | "
             f"{metrics['recall@50']:.6f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Top 20 By Validation NDCG",
+            "",
+            "| Policy | alpha | beta | gamma | top_k_focus | "
+            "ndcg@10 | recall@50 | mrr@10 | hr@10 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in cast(list[dict[str, Any]], payload["top20_by_val_ndcg"]):
+        metrics = cast(dict[str, float], row["metrics"])
+        lines.append(
+            "| "
+            f"{row['policy_name']} | "
+            f"{row['alpha'] if row['alpha'] is not None else '-'} | "
+            f"{row['beta'] if row['beta'] is not None else '-'} | "
+            f"{row['gamma'] if row['gamma'] is not None else '-'} | "
+            f"{row['top_k_focus'] if row['top_k_focus'] is not None else '-'} | "
+            f"{metrics['ndcg@10']:.6f} | "
+            f"{metrics['recall@50']:.6f} | "
+            f"{metrics['mrr@10']:.6f} | "
+            f"{metrics['hr@10']:.6f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Top 20 Recall-Valid Candidates",
+            "",
+            "| Policy | alpha | beta | gamma | top_k_focus | "
+            "ndcg@10 | recall@50 | mrr@10 | hr@10 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in cast(list[dict[str, Any]], payload["top20_recall_valid_by_val_ndcg"]):
+        metrics = cast(dict[str, float], row["metrics"])
+        lines.append(
+            "| "
+            f"{row['policy_name']} | "
+            f"{row['alpha'] if row['alpha'] is not None else '-'} | "
+            f"{row['beta'] if row['beta'] is not None else '-'} | "
+            f"{row['gamma'] if row['gamma'] is not None else '-'} | "
+            f"{row['top_k_focus'] if row['top_k_focus'] is not None else '-'} | "
+            f"{metrics['ndcg@10']:.6f} | "
+            f"{metrics['recall@50']:.6f} | "
+            f"{metrics['mrr@10']:.6f} | "
+            f"{metrics['hr@10']:.6f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Pareto Frontier",
+            "",
+            "| Policy | alpha | beta | gamma | top_k_focus | "
+            "ndcg@10 | recall@50 | mrr@10 | hr@10 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in cast(list[dict[str, Any]], payload["pareto_frontier"]):
+        metrics = cast(dict[str, float], row["metrics"])
+        lines.append(
+            "| "
+            f"{row['policy_name']} | "
+            f"{row['alpha'] if row['alpha'] is not None else '-'} | "
+            f"{row['beta'] if row['beta'] is not None else '-'} | "
+            f"{row['gamma'] if row['gamma'] is not None else '-'} | "
+            f"{row['top_k_focus'] if row['top_k_focus'] is not None else '-'} | "
+            f"{metrics['ndcg@10']:.6f} | "
+            f"{metrics['recall@50']:.6f} | "
+            f"{metrics['mrr@10']:.6f} | "
+            f"{metrics['hr@10']:.6f} |"
         )
 
     return "\n".join(lines) + "\n"
