@@ -12,6 +12,7 @@ runtime:
   max_top_k: 200
   min_top_k: 1
   device: auto
+  sample_data: true
 
 scoring:
   policy_name: ranker_topk_popularity_backfill

@@ -59,6 +59,7 @@ class ServingRuntimeConfig(BaseModel):
     max_top_k: int = 200
     min_top_k: int = 1
     device: str = "auto"
+    sample_data: bool = True
 
 
 class ServingConfig(BaseModel):

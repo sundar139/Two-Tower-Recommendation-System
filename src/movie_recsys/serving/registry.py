@@ -145,7 +145,10 @@ class ArtifactRegistry:
 
         self._validate_required_paths()
 
-        retrieval_config = load_retrieval_config(self._config.paths.retrieval_config, sample=False)
+        retrieval_config = load_retrieval_config(
+            self._config.paths.retrieval_config,
+            sample=bool(self._config.runtime.sample_data),
+        )
         ranker_config = load_ranker_config(self._config.paths.ranker_config)
 
         if retrieval_config.model.model_type != "residual_transformer":
