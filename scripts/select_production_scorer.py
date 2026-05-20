@@ -19,7 +19,7 @@ from movie_recsys.ranking.hybrid import (
     metrics_are_finite,
     query_row_counts,
     score_columns_are_finite,
-    select_best_policy_result,
+    select_recall_constrained_policy,
 )
 
 app = typer.Typer(add_completion=False)
@@ -111,8 +111,14 @@ def build_selection_payload(
     normalization_method: str,
     metadata_audit: dict[str, Any],
     val_results: list[PolicyEvaluation],
+    recall_valid_results: list[PolicyEvaluation],
     selected_val_result: PolicyEvaluation,
     selected_test_metrics: dict[str, float],
+    selection_reason: str,
+    recall_constraint_value: float,
+    selected_by_validation_only: bool,
+    popularity_safe_fallback_used: bool,
+    ranker_hybrid_experimental: bool,
     val_counts: dict[str, int],
     test_counts: dict[str, int],
     baseline_val: dict[str, dict[str, float]],
@@ -135,8 +141,16 @@ def build_selection_payload(
         "selection_split": "val",
         "test_split": "test",
         "normalization_method": normalization_method,
-        "selection_method": "max_val_ndcg_then_mrr_hr_recall",
-        "test_split_used_for_weight_selection": False,
+        "selection_method": "recall_constrained_max_val_ndcg",
+        "selected_by_validation_only": selected_by_validation_only,
+        "test_split_used_for_weight_selection": not selected_by_validation_only,
+        "recall_constraint_value": float(recall_constraint_value),
+        "candidates_passing_recall_constraint": [
+            result.policy.policy_id for result in recall_valid_results
+        ],
+        "popularity_safe_fallback_used": popularity_safe_fallback_used,
+        "ranker_hybrid_experimental": ranker_hybrid_experimental,
+        "selection_reason": selection_reason,
         "metadata_feature_leakage_passed": bool(
             metadata_audit.get("metadata_feature_leakage_passed", False)
         ),
@@ -176,7 +190,9 @@ def _selection_markdown(payload: dict[str, Any]) -> str:
     selected = cast(dict[str, Any], payload["selected_scorer"])
     selected_val = cast(dict[str, float], selected["validation_metrics"])
     selected_test = cast(dict[str, float], selected["test_metrics"])
+    baseline_val = cast(dict[str, Any], payload["baseline_metrics"])["val"]
     baseline_test = cast(dict[str, Any], payload["baseline_metrics"])["test"]
+    popularity_val = cast(dict[str, float], baseline_val["popularity"])
     popularity_test = cast(dict[str, float], baseline_test["popularity"])
 
     lines = [
@@ -186,6 +202,10 @@ def _selection_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- normalization_method: {payload['normalization_method']}",
         f"- metadata_feature_leakage_passed: {payload['metadata_feature_leakage_passed']}",
+        f"- recall_constraint_value: {payload['recall_constraint_value']:.6f}",
+        f"- popularity_safe_fallback_used: {payload['popularity_safe_fallback_used']}",
+        f"- ranker_hybrid_experimental: {payload['ranker_hybrid_experimental']}",
+        f"- selection_reason: {payload['selection_reason']}",
         "- test_split_used_for_weight_selection: "
         f"{payload['test_split_used_for_weight_selection']}",
         "",
@@ -214,6 +234,12 @@ def _selection_markdown(payload: dict[str, Any]) -> str:
         "### Test Delta vs Popularity",
         "",
         f"- ndcg@10: {selected_test['ndcg@10'] - popularity_test['ndcg@10']:+.6f}",
+        f"- recall@50: {selected_test['recall@50'] - popularity_test['recall@50']:+.6f}",
+        "",
+        "### Validation Delta vs Popularity",
+        "",
+        f"- ndcg@10: {selected_val['ndcg@10'] - popularity_val['ndcg@10']:+.6f}",
+        f"- recall@50: {selected_val['recall@50'] - popularity_val['recall@50']:+.6f}",
         "",
         "## Validation Selection Table",
         "",
@@ -304,7 +330,19 @@ def main(
         max_queries=max_queries,
     )
 
-    selected_val_result = select_best_policy_result(val_results)
+    (
+        selected_val_result,
+        recall_valid_results,
+        popularity_safe_fallback_used,
+        ranker_hybrid_experimental,
+        selection_reason,
+        recall_floor,
+    ) = select_recall_constrained_policy(
+        results=val_results,
+        popularity_metrics=baseline_val["popularity"],
+        retention_ratio=0.95,
+    )
+
     selected_test_result, test_counts_stream = evaluate_policy_grid(
         scored_candidates_path=test_scored_path,
         policies=[selected_val_result.policy],
@@ -336,8 +374,14 @@ def main(
         normalization_method=normalization_method,
         metadata_audit=metadata_audit,
         val_results=val_results,
+        recall_valid_results=recall_valid_results,
         selected_val_result=selected_val_result,
         selected_test_metrics=selected_test_metrics,
+        selection_reason=selection_reason,
+        recall_constraint_value=recall_floor,
+        selected_by_validation_only=True,
+        popularity_safe_fallback_used=popularity_safe_fallback_used,
+        ranker_hybrid_experimental=ranker_hybrid_experimental,
         val_counts=val_counts_exact,
         test_counts=test_counts_exact,
         baseline_val=baseline_val,
@@ -368,6 +412,11 @@ def main(
             "validation_metrics": selected_val_result.metrics,
             "test_metrics": selected_test_metrics,
             "metadata_feature_leakage_passed": payload["metadata_feature_leakage_passed"],
+            "recall_constraint_value": payload["recall_constraint_value"],
+            "candidates_passing_recall_constraint": len(
+                payload["candidates_passing_recall_constraint"]
+            ),
+            "popularity_safe_fallback_used": payload["popularity_safe_fallback_used"],
             "validation_rows": len(payload["validation_results"]),
         }
     )

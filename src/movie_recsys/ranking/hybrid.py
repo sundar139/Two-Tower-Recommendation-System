@@ -35,6 +35,8 @@ REQUIRED_SCORER_COLUMNS = [
     "popularity_score",
 ]
 
+BASELINE_POLICY_NAMES = {"popularity_only", "ranker_only", "residual_only"}
+
 
 @dataclass(frozen=True, slots=True)
 class PolicySpec:
@@ -300,6 +302,122 @@ def select_best_policy_result(results: Sequence[PolicyEvaluation]) -> PolicyEval
             result.metrics["recall@50"],
             result.policy.policy_id,
         ),
+    )
+
+
+def recall_constraint_value(
+    *,
+    popularity_recall_at_50: float,
+    retention_ratio: float = 0.95,
+) -> float:
+    """Compute minimum Recall@50 required by the popularity-relative guard."""
+
+    return float(popularity_recall_at_50 * retention_ratio)
+
+
+def is_hybrid_policy(policy: PolicySpec) -> bool:
+    """Return whether a policy is hybrid (non-baseline)."""
+
+    return policy.policy_name not in BASELINE_POLICY_NAMES
+
+
+def select_recall_constrained_policy(
+    *,
+    results: Sequence[PolicyEvaluation],
+    popularity_metrics: dict[str, float],
+    retention_ratio: float = 0.95,
+) -> tuple[PolicyEvaluation, list[PolicyEvaluation], bool, bool, str, float]:
+    """Select policy from validation metrics under recall-constrained objective.
+
+    Selection steps:
+    1) Keep candidates with Recall@50 >= retention_ratio * popularity Recall@50.
+    2) If no hybrid candidate survives, force popularity_only safe fallback.
+    3) Otherwise choose highest NDCG@10 from recall-valid candidates.
+    """
+
+    if not results:
+        msg = "Cannot select from empty policy result set"
+        raise ValueError(msg)
+
+    popularity_recall = float(popularity_metrics["recall@50"])
+    constraint = recall_constraint_value(
+        popularity_recall_at_50=popularity_recall,
+        retention_ratio=retention_ratio,
+    )
+
+    passing = [
+        result
+        for result in results
+        if float(result.metrics["recall@50"]) >= constraint
+    ]
+    passing_hybrid = [result for result in passing if is_hybrid_policy(result.policy)]
+
+    popularity_result = next(
+        (result for result in results if result.policy.policy_name == "popularity_only"),
+        None,
+    )
+    if popularity_result is None:
+        msg = "Required baseline policy 'popularity_only' is missing"
+        raise ValueError(msg)
+
+    if not passing_hybrid:
+        return (
+            popularity_result,
+            passing,
+            True,
+            True,
+            "No hybrid met Recall@50 constraint; selected popularity_only safe fallback",
+            constraint,
+        )
+
+    selected = select_best_policy_result(passing)
+    return (
+        selected,
+        passing,
+        False,
+        False,
+        "Selected highest validation NDCG@10 among recall-valid candidates",
+        constraint,
+    )
+
+
+def pareto_frontier(results: Sequence[PolicyEvaluation]) -> list[PolicyEvaluation]:
+    """Return non-dominated candidates maximizing NDCG, Recall, MRR, and HR."""
+
+    frontier: list[PolicyEvaluation] = []
+    for candidate in results:
+        dominated = False
+        for other in results:
+            if other is candidate:
+                continue
+
+            other_metrics = other.metrics
+            candidate_metrics = candidate.metrics
+            not_worse_all = all(
+                float(other_metrics[name]) >= float(candidate_metrics[name])
+                for name in ("ndcg@10", "recall@50", "mrr@10", "hr@10")
+            )
+            strictly_better_any = any(
+                float(other_metrics[name]) > float(candidate_metrics[name])
+                for name in ("ndcg@10", "recall@50", "mrr@10", "hr@10")
+            )
+            if not_worse_all and strictly_better_any:
+                dominated = True
+                break
+
+        if not dominated:
+            frontier.append(candidate)
+
+    return sorted(
+        frontier,
+        key=lambda result: (
+            result.metrics["ndcg@10"],
+            result.metrics["recall@50"],
+            result.metrics["mrr@10"],
+            result.metrics["hr@10"],
+            result.policy.policy_id,
+        ),
+        reverse=True,
     )
 
 
