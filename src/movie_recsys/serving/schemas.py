@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class RecommendationItem(BaseModel):
     """Single recommendation output row."""
 
+    rank: int = Field(ge=1)
     item_idx: int = Field(ge=0)
     score: float
     residual_score: float
@@ -28,7 +29,9 @@ class RecommendResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_idx: int
-    top_k: int
+    requested_top_k: int
+    returned_top_k: int
+    policy_name: str
     total_candidates: int
     recommendations: list[RecommendationItem]
 
@@ -40,3 +43,22 @@ class ReadinessResponse(BaseModel):
 
     status: str
     ready: bool
+    model_loaded: bool
+    startup_error: str | None = None
+
+
+class ErrorDetail(BaseModel):
+    """Structured API error payload details."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    """Envelope for API error responses."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: ErrorDetail

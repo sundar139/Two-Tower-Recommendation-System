@@ -15,6 +15,7 @@ from movie_recsys.serving.errors import ServingError, to_http_exception
 from movie_recsys.serving.recommender import RecommendationService
 from movie_recsys.serving.registry import ArtifactRegistry
 from movie_recsys.serving.schemas import (
+    ErrorResponse,
     ReadinessResponse,
     RecommendationItem,
     RecommendRequest,
@@ -68,13 +69,24 @@ def create_app() -> FastAPI:
     ) -> ReadinessResponse:
         startup_error = getattr(request.app.state, "startup_error", None)
         if startup_error:
-            return ReadinessResponse(status="not_ready", ready=False)
+            return ReadinessResponse(
+                status="not_ready",
+                ready=False,
+                model_loaded=False,
+                startup_error=str(startup_error),
+            )
         return ReadinessResponse(
             status="ready" if registry.is_ready() else "starting",
             ready=registry.is_ready(),
+            model_loaded=registry.is_ready(),
+            startup_error=None,
         )
 
-    @app.post("/v1/recommend", response_model=RecommendResponse)
+    @app.post(
+        "/v1/recommend",
+        response_model=RecommendResponse,
+        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
     def recommend(
         request: RecommendRequest,
         service: RecommendationService = Depends(get_recommendation_service),
@@ -83,17 +95,20 @@ def create_app() -> FastAPI:
 
         items = [
             RecommendationItem(
+                rank=index,
                 item_idx=row.item_idx,
                 score=row.score,
                 residual_score=row.residual_score,
                 ranker_score=row.ranker_score,
                 popularity_score=row.popularity_score,
             )
-            for row in rows
+            for index, row in enumerate(rows, start=1)
         ]
         return RecommendResponse(
             user_idx=request.user_idx,
-            top_k=request.top_k,
+            requested_top_k=request.top_k,
+            returned_top_k=len(items),
+            policy_name=service.policy_name,
             total_candidates=len(rows),
             recommendations=items,
         )

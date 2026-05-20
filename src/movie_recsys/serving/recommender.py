@@ -8,11 +8,16 @@ from typing import Any
 import numpy as np
 import polars as pl
 import torch
-from fastapi import status
 
 from movie_recsys.modeling.faiss_index import search_index
 from movie_recsys.ranking.features import _build_split_features
-from movie_recsys.serving.errors import ServingError
+from movie_recsys.serving.errors import (
+    artifacts_not_ready,
+    feature_mismatch,
+    invalid_top_k,
+    no_candidates,
+    user_not_found,
+)
 from movie_recsys.serving.registry import ArtifactRegistry, LoadedArtifacts
 from movie_recsys.serving.scorer import PolicySpec, rank_with_policy
 
@@ -34,24 +39,20 @@ class RecommendationService:
     def __init__(self, registry: ArtifactRegistry) -> None:
         self._registry = registry
 
+    @property
+    def policy_name(self) -> str:
+        return self._registry.config.scoring.policy_name
+
     def _loaded_artifacts(self) -> LoadedArtifacts:
         try:
             return self._registry.artifacts
         except RuntimeError as exc:
-            raise ServingError(
-                message="Serving artifacts are not loaded",
-                code="artifacts_not_ready",
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            ) from exc
+            raise artifacts_not_ready() from exc
 
     def _user_history(self, *, users_frame: pl.DataFrame, user_idx: int) -> tuple[list[int], int]:
         user_row = users_frame.filter(pl.col("user_idx") == user_idx)
         if user_row.height != 1:
-            raise ServingError(
-                message=f"Unknown user_idx: {user_idx}",
-                code="user_not_found",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
+            raise user_not_found(user_idx)
 
         raw_history = user_row.get_column("train_history_item_idx").to_list()[0] or []
         history = [int(value) for value in raw_history]
@@ -158,11 +159,7 @@ class RecommendationService:
             rows.append(row)
 
         if not rows:
-            raise ServingError(
-                message="No valid candidates available after filtering",
-                code="no_candidates",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
+            raise no_candidates("No valid candidates available after filtering")
         return pl.DataFrame(rows)
 
     def recommend(self, *, user_idx: int, top_k: int) -> list[RecommendationRow]:
@@ -170,28 +167,20 @@ class RecommendationService:
 
         artifacts = self._loaded_artifacts()
 
-        min_top_k = int(artifacts.ranker_config.ranker_top_k)
         configured_min = int(self._registry.config.runtime.min_top_k)
         configured_max = int(self._registry.config.runtime.max_top_k)
         min_allowed = max(configured_min, 1)
         max_allowed = max(configured_max, min_allowed)
         effective_top_k = max(min(top_k, max_allowed), min_allowed)
         if top_k < min_allowed or top_k > max_allowed:
-            raise ServingError(
-                message=(
-                    f"top_k must be between {min_allowed} and {max_allowed}, "
-                    f"received {top_k}"
-                ),
-                code="invalid_top_k",
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise invalid_top_k(
+                top_k=top_k,
+                min_allowed=min_allowed,
+                max_allowed=max_allowed,
             )
 
         if user_idx < 0 or user_idx >= artifacts.feature_tables.user_features.shape[0]:
-            raise ServingError(
-                message=f"Unknown user_idx: {user_idx}",
-                code="user_not_found",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
+            raise user_not_found(user_idx)
 
         history_item_idx, timestamp_context = self._user_history(
             users_frame=artifacts.users_frame,
@@ -213,7 +202,7 @@ class RecommendationService:
 
         candidate_pool_size = max(
             int(self._registry.config.runtime.candidate_top_k),
-            max(effective_top_k, min_top_k),
+            effective_top_k,
         )
         retrieved_items, retrieved_scores, _latency_ms = search_index(
             artifacts.index,
@@ -238,11 +227,7 @@ class RecommendationService:
             dedup_scores.append(float(score))
 
         if not dedup_items:
-            raise ServingError(
-                message="No unseen candidates available for this user",
-                code="no_candidates",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
+            raise no_candidates()
 
         candidate_frame = self._candidate_frame(
             user_idx=user_idx,
@@ -264,14 +249,7 @@ class RecommendationService:
             name for name in artifacts.feature_columns if name not in feature_frame.columns
         ]
         if missing_feature_columns:
-            raise ServingError(
-                message=(
-                    "Serving feature frame is missing ranker columns: "
-                    + ", ".join(missing_feature_columns)
-                ),
-                code="feature_mismatch",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            raise feature_mismatch(missing_feature_columns)
 
         feature_matrix = feature_frame.select(artifacts.feature_columns).to_numpy().astype(
             np.float32,
