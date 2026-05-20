@@ -81,6 +81,41 @@ uv run python scripts/compare_retrieval_ranker.py
 uv run python scripts/check_ranker_acceptance.py
 ```
 
+## Full-Data Results (Latest)
+
+Training (`scripts/train_ranker.py`, run id `d1666b7ed1b34e39bc15202273380f95`):
+
+- `completed_epochs: 8`
+- `final_train_loss: 0.034609`
+- `best_val_metrics`: `hr@10=0.281478`, `mrr@10=0.150470`, `ndcg@10=0.181151`, `recall@50=0.532570`
+- `stopped_due_to_runtime: false`
+- `stopped_due_to_memory: false`
+- checkpoints: `artifacts/models/best_neural_ranker.pt`, `artifacts/models/checkpoints/neural_ranker_epoch_7.pt`
+
+Validation (`artifacts/reports/ranker_eval_val.json`):
+
+- ranker NDCG@10: `0.181151`
+- residual NDCG@10: `0.045040`
+- popularity NDCG@10: `0.266328`
+- ranker delta vs residual NDCG@10: `+0.136110`
+- ranker delta vs popularity NDCG@10: `-0.085177`
+- evaluated size: `161,821` queries / `32,452,397` rows
+
+Test (`artifacts/reports/ranker_eval_test.json`):
+
+- ranker NDCG@10: `0.187112`
+- residual NDCG@10: `0.032480`
+- popularity NDCG@10: `0.262527`
+- ranker delta vs residual NDCG@10: `+0.154633`
+- ranker delta vs popularity NDCG@10: `-0.075414`
+- evaluated size: `161,821` queries / `32,461,176` rows
+
+Acceptance (`artifacts/reports/ranker_acceptance_full.json`):
+
+- `acceptance_passed: true`
+- `full_data_ranker_allowed: true`
+- all primary rules and guard checks passed
+
 ## Acceptance Rules
 
 Primary gate uses OR over:

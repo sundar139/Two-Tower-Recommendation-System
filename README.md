@@ -243,6 +243,29 @@ Decision:
 - Full-data CL is blocked until a future sample acceptance run passes.
 - Neural ranker work should continue using residual-transformer retrieval artifacts.
 
+## Neural Ranker Full-Data Status (Latest)
+
+Training run summary (`scripts/train_ranker.py`, MLflow run `d1666b7ed1b34e39bc15202273380f95`):
+
+- `completed_epochs: 8`
+- `final_train_loss: 0.034609`
+- `best_val_ndcg@10: 0.181151`
+- `stopped_due_to_runtime: false`
+- `stopped_due_to_memory: false`
+
+Full evaluation (`scripts/evaluate_ranker.py`):
+
+- val: ranker NDCG@10 `0.181151` vs residual `0.045040` (delta `+0.136110`), vs popularity `0.266328`
+- test: ranker NDCG@10 `0.187112` vs residual `0.032480` (delta `+0.154633`), vs popularity `0.262527`
+- val size: `161,821` queries / `32,452,397` rows
+- test size: `161,821` queries / `32,461,176` rows
+
+Acceptance (`scripts/check_ranker_acceptance.py`):
+
+- `acceptance_passed: true`
+- `full_data_ranker_allowed: true`
+- all primary rules and mandatory guards passed (`artifacts/reports/ranker_acceptance_full.json`)
+
 ## Step 2 Validation Commands
 
 ### Sample Validation Commands
