@@ -143,6 +143,50 @@ Reports:
 - `artifacts/reports/production_scorer_selection.md`
 - `artifacts/reports/production_scorer_acceptance.json`
 
+## Step 5D: Recall-Constrained Production Scorer Tuning
+
+Why Step 5D was needed:
+
+- Step 5C selected the highest validation NDCG scorer, but it failed acceptance due to Recall@50 drop vs popularity.
+
+Step 5D selection policy:
+
+- validation-only selection (`selected_by_validation_only=true`)
+- strict recall constraint: `Recall@50 >= 0.95 * popularity Recall@50`
+- recall constraint value on val: `0.675868`
+- metadata leakage audit: passed
+
+Expanded grid:
+
+- `ranker_plus_popularity`
+	- `alpha=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0]`
+	- `beta=[0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]`
+- `ranker_plus_popularity_plus_residual`
+	- `alpha=[0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`
+	- `beta=[0.2, 0.5, 1.0, 1.5, 2.0]`
+	- `gamma=[0.0, 0.05, 0.1, 0.2]`
+- `ranker_topk_popularity_backfill`
+	- `top_k_focus=[10, 20, 30, 50]`
+
+Selection summary:
+
+- candidates passing recall constraint: `64`
+- popularity safe fallback used: `false`
+- selected scorer: `ranker_topk_popularity_backfill`
+- selected weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`, `top_k_focus=20`
+
+Selected scorer metrics:
+
+- validation: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.729658`
+- test: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.712374`
+
+Acceptance outcome:
+
+- `acceptance_passed: true`
+- `step6_fastapi_unblocked: true`
+- `step6_unblocked_mode: selected_scorer`
+- recall guard passed (`recall50_relative_drop_vs_popularity_le_5pct=true`)
+
 Training (`scripts/train_ranker.py`, run id `d1666b7ed1b34e39bc15202273380f95`):
 
 - `completed_epochs: 8`

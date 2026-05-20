@@ -271,8 +271,8 @@ Step 5C: Production Scorer Selection and Popularity-Aware Ranker Audit completed
 
 - normalization: query-wise min-max (split-local; no cross-split leakage)
 - validation-only weight selection: test split was not used for weight search
-- evaluated policies: `popularity_only`, `residual_only`, `ranker_only`, `ranker_plus_popularity`, `ranker_plus_residual`, `ranker_plus_popularity_plus_residual`
-- manual grid: `alpha=[0.5, 0.7, 0.85, 1.0]`, `beta=[0.0, 0.1, 0.2, 0.3, 0.5]`, `gamma=[0.0, 0.1, 0.2, 0.3]`
+- evaluated policies: `popularity_only`, `residual_only`, `ranker_only`, `ranker_plus_popularity`, `ranker_plus_popularity_plus_residual`, `ranker_topk_popularity_backfill`
+- manual grid (Step 5C): `alpha=[0.5, 0.7, 0.85, 1.0]`, `beta=[0.0, 0.1, 0.2, 0.3, 0.5]`, `gamma=[0.0, 0.1, 0.2, 0.3]`
 
 Selected scorer (validation winner):
 
@@ -295,6 +295,34 @@ Reports:
 - `artifacts/reports/production_scorer_selection.md`
 - `artifacts/reports/production_scorer_acceptance.json`
 - `docs/production_scorer.md`
+
+Step 5D: Recall-Constrained Production Scorer Tuning completed.
+
+- objective: enforce validation recall guard before scorer selection (`Recall@50 >= 0.95 * popularity Recall@50`)
+- recall constraint value: `0.675868`
+- selected_by_validation_only: `true`
+- candidates_passing_recall_constraint: `64`
+- popularity_safe_fallback_used: `false`
+
+Expanded recall-aware grid:
+
+- `ranker_plus_popularity`: `alpha=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0]`, `beta=[0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]`
+- `ranker_plus_popularity_plus_residual`: `alpha=[0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`, `beta=[0.2, 0.5, 1.0, 1.5, 2.0]`, `gamma=[0.0, 0.05, 0.1, 0.2]`
+- `ranker_topk_popularity_backfill`: `top_k_focus=[10, 20, 30, 50]` (deterministic two-stage policy)
+
+Selected scorer (Step 5D validation winner):
+
+- policy: `ranker_topk_popularity_backfill`
+- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`, `top_k_focus=20`
+- validation: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.729658`
+- test: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.712374`
+
+Step 5D acceptance (`scripts/check_production_scorer_acceptance.py`):
+
+- `acceptance_passed: true`
+- `step6_fastapi_unblocked: true`
+- `step6_unblocked_mode: selected_scorer`
+- recall guard result: passed (`recall50_relative_drop_vs_popularity_le_5pct=true`, val/test drop `0.0`)
 
 ## Step 2 Validation Commands
 

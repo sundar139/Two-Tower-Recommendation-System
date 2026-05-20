@@ -1,88 +1,79 @@
-# Production Scorer Decision (Step 5C)
+# Production Scorer Decision (Step 5C -> Step 5D)
 
-## Why This Step Was Required
+## Context
 
-The neural ranker passed Step 5B against the residual retriever baseline, but popularity still outperformed ranker-only NDCG@10 on full validation and test.
+Step 5C selected a high-NDCG scorer (`ranker_plus_popularity`, `alpha=1.0`, `beta=0.1`) but failed acceptance due to Recall@50 drop vs popularity (val `16.0572%`, test `6.2205%`).
 
-Because of that gap, serving/API work remained blocked until scorer-policy selection was completed across popularity, residual, ranker, and popularity-aware hybrids.
+Step 5D introduced recall-constrained validation selection to ensure production-safe recall behavior before serving/API work.
 
-## Candidate Policies
+## Candidate Policies (Step 5D)
 
 1. `popularity_only`
 2. `residual_only`
 3. `ranker_only`
 4. `ranker_plus_popularity`
-5. `ranker_plus_residual`
-6. `ranker_plus_popularity_plus_residual`
+5. `ranker_plus_popularity_plus_residual`
+6. `ranker_topk_popularity_backfill` (two-stage deterministic policy)
 
-Hybrid forms use query-wise normalized scores:
+## Selection Protocol (Step 5D)
 
-- `ranker_plus_popularity = alpha * ranker_norm + beta * popularity_norm`
-- `ranker_plus_residual = alpha * ranker_norm + beta * residual_norm`
-- `ranker_plus_popularity_plus_residual = alpha * ranker_norm + beta * popularity_norm + gamma * residual_norm`
-
-## Selection Protocol
-
-- normalization method: `query_minmax` (query-local, split-local)
+- normalization: `query_minmax` (query-local, split-local)
 - no global normalization leakage across splits
-- weight selection split: validation only
-- test split is never used for weight search
-- manual grid only (no Optuna):
-  - `alpha = [0.5, 0.7, 0.85, 1.0]`
-  - `beta = [0.0, 0.1, 0.2, 0.3, 0.5]`
-  - `gamma = [0.0, 0.1, 0.2, 0.3]`
+- validation-only selection (`selected_by_validation_only=true`)
+- strict recall constraint: `Recall@50 >= 0.95 * popularity Recall@50`
+- recall constraint value on val: `0.675868`
+- test split not used for weight selection
 
-## Full-Data Inputs
+Expanded manual grid (no Optuna):
 
-- val queries/rows: `161,821 / 32,452,397`
-- test queries/rows: `161,821 / 32,461,176`
+- `ranker_plus_popularity`
+  - `alpha=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0]`
+  - `beta=[0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]`
+- `ranker_plus_popularity_plus_residual`
+  - `alpha=[0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`
+  - `beta=[0.2, 0.5, 1.0, 1.5, 2.0]`
+  - `gamma=[0.0, 0.05, 0.1, 0.2]`
+- `ranker_topk_popularity_backfill`
+  - `top_k_focus=[10, 20, 30, 50]`
+  - stage-1 hybrid weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`
 
-## Selection Outcome
+## Step 5D Outcome
 
-Selected scorer (validation winner):
+Selected scorer (validation winner under recall constraint):
 
-- policy: `ranker_plus_popularity`
-- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`
-- validation metrics:
-  - `hr@10=0.435364`
-  - `mrr@10=0.273246`
-  - `ndcg@10=0.311523`
-  - `recall@50=0.597203`
-- test metrics:
-  - `hr@10=0.447748`
-  - `mrr@10=0.277436`
-  - `ndcg@10=0.317591`
-  - `recall@50=0.637241`
+- policy: `ranker_topk_popularity_backfill`
+- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`, `top_k_focus=20`
+- candidates passing recall constraint: `64`
+- popularity safe fallback used: `false`
 
-Reference single-policy validation NDCG@10 values:
+Validation metrics:
 
-- popularity_only: `0.266328`
-- ranker_only: `0.181151`
-- residual_only: `0.045040`
+- `hr@10=0.435364`
+- `mrr@10=0.273246`
+- `ndcg@10=0.311523`
+- `recall@50=0.729658`
 
-The full validation table (all 123 policy rows) is stored in:
+Test metrics (evaluated only after validation selection):
 
-- `artifacts/reports/production_scorer_selection.md`
+- `hr@10=0.447748`
+- `mrr@10=0.277436`
+- `ndcg@10=0.317591`
+- `recall@50=0.712374`
 
 ## Acceptance Outcome
 
-Acceptance report:
+- `acceptance_passed: true`
+- `step6_fastapi_unblocked: true`
+- `step6_unblocked_mode: selected_scorer`
+- primary rules: passed
+- mandatory guards: passed
+- recall guard: passed (`recall50_relative_drop_vs_popularity_le_5pct=true`)
 
+## Reports
+
+- `artifacts/reports/production_scorer_selection.json`
+- `artifacts/reports/production_scorer_selection.md`
 - `artifacts/reports/production_scorer_acceptance.json`
-
-Result:
-
-- `acceptance_passed: false`
-- primary popularity-comparison rules: passed
-- failed mandatory guard: `recall50_relative_drop_vs_popularity_le_5pct`
-- recall@50 relative drop vs popularity:
-  - val: `0.160572`
-  - test: `0.062205`
-
-Decision:
-
-- Step 6 FastAPI serving is **not unblocked**.
-- Next required work is recall-preserving scorer design/audit that satisfies the popularity recall guard.
 
 ## Reproducibility Commands
 
