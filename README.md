@@ -49,9 +49,18 @@ Implemented in Step 5 (neural re-ranker):
 - Ranker train/eval scripts with MLflow logging and checkpointing
 - Ranker-vs-residual comparison and acceptance checker tooling
 
+Implemented in Step 6 (FastAPI serving layer):
+
+- Typed serving config (`configs/serving.yaml`) and runtime app wiring
+- Artifact registry for residual retriever, FAISS bundle, and neural ranker
+- Recommendation service with deterministic two-stage scorer policy application
+- FastAPI endpoints for health, readiness, and recommendations
+- Typed API schemas and structured error responses
+- Local runtime helper (`scripts/run_api.py`) and smoke test (`scripts/smoke_test_api.py`)
+- Serving-focused test coverage for config, registry, scorer, errors, and API behavior
+
 Not yet implemented in this step:
 
-- FastAPI serving layer
 - Ollama explanation endpoints
 
 ## Dataset Note
@@ -191,6 +200,24 @@ uv run python scripts/evaluate_ranker.py --split test
 uv run python scripts/compare_retrieval_ranker.py
 uv run python scripts/check_ranker_acceptance.py
 ```
+
+## Step 6 FastAPI Serving Commands
+
+Run API:
+
+```powershell
+uv run python scripts/run_api.py --config configs/serving.yaml --host 127.0.0.1 --port 8000
+```
+
+Smoke test:
+
+```powershell
+uv run python scripts/smoke_test_api.py --base-url http://127.0.0.1:8000 --user-idx 0 --top-k 20 --require-ready
+```
+
+Serving workflow details:
+
+- `docs/fastapi_serving.md`
 
 ## Full Residual Validation Commands
 
