@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -26,7 +27,8 @@ from movie_recsys.serving.telemetry import get_logger, log_event
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    config: ServingConfig = load_serving_config()
+    config_path = os.environ.get("MOVIE_RECSYS_SERVING_CONFIG", "configs/serving.yaml")
+    config: ServingConfig = load_serving_config(config_path)
     registry = ArtifactRegistry(config)
     logger = get_logger()
 
