@@ -83,6 +83,66 @@ uv run python scripts/check_ranker_acceptance.py
 
 ## Full-Data Results (Latest)
 
+Step 5B: Full-Data Neural Ranker Validation completed.
+
+The full-data neural ranker pipeline was validated using residual transformer retrieval candidates. Candidate diagnostics passed integrity checks, and full validation/test ranker evaluation completed successfully.
+
+Full validation results:
+
+- Ranker NDCG@10: `0.181151`
+- Residual retriever NDCG@10: `0.045040`
+- Delta: `+0.136110`
+- Query count: `161,821`
+- Row count: `32,452,397`
+
+Full test results:
+
+- Ranker NDCG@10: `0.187112`
+- Residual retriever NDCG@10: `0.032480`
+- Delta: `+0.154633`
+- Query count: `161,821`
+- Row count: `32,461,176`
+
+Acceptance passed against the residual retrieval baseline. Popularity still outperformed ranker-only NDCG@10 on both full splits, so a popularity-aware scorer audit was required before serving/API work.
+
+## Step 5C: Production Scorer Selection (Full Data)
+
+Objective:
+
+- determine production scorer policy across `popularity_only`, `residual_only`, `ranker_only`, and ranker hybrids
+- use validation-only weight selection (no test leakage)
+
+Scorer selection setup:
+
+- normalization: query-wise min-max (`query_minmax`)
+- candidate metadata leakage audit: passed
+- weight grid (manual):
+	- `alpha = [0.5, 0.7, 0.85, 1.0]`
+	- `beta = [0.0, 0.1, 0.2, 0.3, 0.5]`
+	- `gamma = [0.0, 0.1, 0.2, 0.3]`
+- validation table rows evaluated: `123`
+
+Selected scorer (validation winner):
+
+- policy: `ranker_plus_popularity`
+- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`
+- validation metrics: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.597203`
+- test metrics: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.637241`
+
+Acceptance against popularity baseline:
+
+- primary rules: passed
+- mandatory guards: failed on `recall50_relative_drop_vs_popularity_le_5pct`
+- recall@50 relative drop vs popularity: val `0.160572`, test `0.062205`
+- `acceptance_passed: false`
+- `step6_fastapi_unblocked: false`
+
+Reports:
+
+- `artifacts/reports/production_scorer_selection.json`
+- `artifacts/reports/production_scorer_selection.md`
+- `artifacts/reports/production_scorer_acceptance.json`
+
 Training (`scripts/train_ranker.py`, run id `d1666b7ed1b34e39bc15202273380f95`):
 
 - `completed_epochs: 8`

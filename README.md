@@ -245,26 +245,56 @@ Decision:
 
 ## Neural Ranker Full-Data Status (Latest)
 
-Training run summary (`scripts/train_ranker.py`, MLflow run `d1666b7ed1b34e39bc15202273380f95`):
+Step 5B: Full-Data Neural Ranker Validation completed.
 
-- `completed_epochs: 8`
-- `final_train_loss: 0.034609`
-- `best_val_ndcg@10: 0.181151`
-- `stopped_due_to_runtime: false`
-- `stopped_due_to_memory: false`
+The full-data neural ranker pipeline was validated using residual transformer retrieval candidates. Candidate diagnostics passed integrity checks, and full validation/test ranker evaluation completed successfully.
 
-Full evaluation (`scripts/evaluate_ranker.py`):
+Full validation results:
 
-- val: ranker NDCG@10 `0.181151` vs residual `0.045040` (delta `+0.136110`), vs popularity `0.266328`
-- test: ranker NDCG@10 `0.187112` vs residual `0.032480` (delta `+0.154633`), vs popularity `0.262527`
-- val size: `161,821` queries / `32,452,397` rows
-- test size: `161,821` queries / `32,461,176` rows
+- Ranker NDCG@10: `0.181151`
+- Residual retriever NDCG@10: `0.045040`
+- Delta: `+0.136110`
+- Query count: `161,821`
+- Row count: `32,452,397`
 
-Acceptance (`scripts/check_ranker_acceptance.py`):
+Full test results:
 
-- `acceptance_passed: true`
-- `full_data_ranker_allowed: true`
-- all primary rules and mandatory guards passed (`artifacts/reports/ranker_acceptance_full.json`)
+- Ranker NDCG@10: `0.187112`
+- Residual retriever NDCG@10: `0.032480`
+- Delta: `+0.154633`
+- Query count: `161,821`
+- Row count: `32,461,176`
+
+Acceptance passed against the residual retrieval baseline. Popularity still outperformed ranker-only NDCG@10 on both splits, so Step 5C ran a popularity-aware scorer audit before any serving/API work.
+
+Step 5C: Production Scorer Selection and Popularity-Aware Ranker Audit completed.
+
+- normalization: query-wise min-max (split-local; no cross-split leakage)
+- validation-only weight selection: test split was not used for weight search
+- evaluated policies: `popularity_only`, `residual_only`, `ranker_only`, `ranker_plus_popularity`, `ranker_plus_residual`, `ranker_plus_popularity_plus_residual`
+- manual grid: `alpha=[0.5, 0.7, 0.85, 1.0]`, `beta=[0.0, 0.1, 0.2, 0.3, 0.5]`, `gamma=[0.0, 0.1, 0.2, 0.3]`
+
+Selected scorer (validation winner):
+
+- policy: `ranker_plus_popularity`
+- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`
+- validation: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.597203`
+- test: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.637241`
+
+Production scorer acceptance (`scripts/check_production_scorer_acceptance.py`):
+
+- `acceptance_passed: false`
+- primary popularity-comparison rules: passed
+- failed guard: `recall50_relative_drop_vs_popularity_le_5pct`
+- recall relative drop vs popularity: val `0.160572`, test `0.062205`
+- Step 6 FastAPI serving unblocked: `false`
+
+Reports:
+
+- `artifacts/reports/production_scorer_selection.json`
+- `artifacts/reports/production_scorer_selection.md`
+- `artifacts/reports/production_scorer_acceptance.json`
+- `docs/production_scorer.md`
 
 ## Step 2 Validation Commands
 
