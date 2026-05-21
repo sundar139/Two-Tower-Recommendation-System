@@ -1,3 +1,6 @@
+app_name: MovieLens Two-Tower Recommender API
+environment: local
+
 paths:
   retrieval_config: configs/transformer_retrieval_residual.yaml
   ranker_config: configs/ranker.yaml

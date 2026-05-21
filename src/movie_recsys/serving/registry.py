@@ -39,6 +39,7 @@ class LoadedArtifacts:
     feature_columns: list[str]
     users_frame: pl.DataFrame
     items_frame: pl.DataFrame
+    interactions_train_frame: pl.DataFrame
     device: torch.device
 
 
@@ -161,6 +162,7 @@ class ArtifactRegistry:
         feature_tables = load_feature_tables(retrieval_config)
         users_frame = pl.read_parquet(retrieval_config.users_path).sort("user_idx")
         items_frame = pl.read_parquet(retrieval_config.items_path).sort("item_idx")
+        interactions_train_frame = pl.read_parquet(retrieval_config.train_path)
 
         feature_columns = _load_feature_columns(self._config.paths.ranker_feature_manifest)
         device = _select_device(self._config.runtime.device)
@@ -222,6 +224,7 @@ class ArtifactRegistry:
             feature_columns=feature_columns,
             users_frame=users_frame,
             items_frame=items_frame,
+            interactions_train_frame=interactions_train_frame,
             device=device,
         )
 

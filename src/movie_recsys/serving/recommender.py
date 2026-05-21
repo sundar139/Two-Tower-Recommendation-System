@@ -33,6 +33,17 @@ class RecommendationRow:
     popularity_score: float
 
 
+@dataclass(slots=True)
+class UserHistoryRow:
+    """History item returned by serving history endpoint."""
+
+    movie_id: int
+    item_idx: int
+    title: str
+    genres: str
+    timestamp: int | None
+
+
 class RecommendationService:
     """Service orchestrating retrieval and reranking."""
 
@@ -42,6 +53,59 @@ class RecommendationService:
     @property
     def policy_name(self) -> str:
         return self._registry.config.scoring.policy_name
+
+    def resolve_user_idx(self, *, user_id: int) -> int | None:
+        """Resolve original user id to internal user_idx."""
+
+        artifacts = self._loaded_artifacts()
+        user_row = artifacts.users_frame.filter(pl.col("original_userId") == user_id)
+        if user_row.height != 1:
+            return None
+        return int(user_row.get_column("user_idx").to_list()[0])
+
+    def resolve_user_id(self, *, user_idx: int) -> int | None:
+        """Resolve internal user_idx back to original user id."""
+
+        artifacts = self._loaded_artifacts()
+        user_row = artifacts.users_frame.filter(pl.col("user_idx") == user_idx)
+        if user_row.height != 1:
+            return None
+        return int(user_row.get_column("original_userId").to_list()[0])
+
+    def get_user_history(
+        self,
+        *,
+        user_id: int,
+        limit: int = 100,
+    ) -> tuple[int, list[UserHistoryRow]]:
+        """Return most recent train-history rows for a user_id, capped by limit."""
+
+        artifacts = self._loaded_artifacts()
+        user_idx = self.resolve_user_idx(user_id=user_id)
+        if user_idx is None:
+            raise user_not_found(user_id)
+
+        interactions = artifacts.interactions_train_frame.filter(pl.col("userId") == user_id)
+        if interactions.is_empty():
+            return user_idx, []
+
+        limited = interactions.sort("timestamp", descending=True).head(max(limit, 1))
+        items = artifacts.items_frame.select(
+            ["item_idx", "title", "genres", "original_movieId"]
+        )
+        joined = limited.join(items, on="item_idx", how="left")
+
+        history_rows = [
+            UserHistoryRow(
+                movie_id=int(row["movieId"]),
+                item_idx=int(row["item_idx"]),
+                title=str(row["title"] or ""),
+                genres=str(row["genres"] or ""),
+                timestamp=(int(row["timestamp"]) if row["timestamp"] is not None else None),
+            )
+            for row in joined.to_dicts()
+        ]
+        return user_idx, history_rows
 
     def _loaded_artifacts(self) -> LoadedArtifacts:
         try:

@@ -67,6 +67,8 @@ class ServingConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    app_name: str = "MovieLens Two-Tower Recommender API"
+    environment: str = "local"
     paths: ServingPathsConfig = ServingPathsConfig()
     scoring: ServingScoringConfig = ServingScoringConfig()
     api: ServingApiConfig = ServingApiConfig()
@@ -139,4 +141,14 @@ def load_serving_config(config_path: str | Path = "configs/serving.yaml") -> Ser
         raise ValueError(msg)
     runtime = ServingRuntimeConfig.model_validate(runtime_raw)
 
-    return ServingConfig(paths=paths, scoring=scoring, api=api, runtime=runtime)
+    app_name = str(raw.get("app_name", "MovieLens Two-Tower Recommender API"))
+    environment = str(raw.get("environment", "local"))
+
+    return ServingConfig(
+        app_name=app_name,
+        environment=environment,
+        paths=paths,
+        scoring=scoring,
+        api=api,
+        runtime=runtime,
+    )
