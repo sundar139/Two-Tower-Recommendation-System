@@ -1,15 +1,17 @@
-# Step 6B Serving API Contract
+# Step 7B Serving API Contract
 
 ## Scope
 
-Step 6B finalizes local FastAPI serving for the approved recommendation stack:
+Step 6B/7B finalizes local FastAPI serving for the approved recommendation stack:
 
 - residual transformer retriever backbone
 - FAISS candidate retrieval
 - neural ranker rescoring
 - production scorer policy: `ranker_topk_popularity_backfill`
 
-Step 6B also adds contract-compatible aliases, cold-start fallback behavior, and local validation/benchmark tooling.
+Step 6B adds contract-compatible aliases, cold-start fallback behavior, and local validation/benchmark tooling.
+
+Step 7B adds optional local Ollama-powered explanation generation with fail-open behavior and explanation-focused endpoints.
 
 ## Approved Production Policy
 
@@ -31,6 +33,8 @@ Step 6B also adds contract-compatible aliases, cold-start fallback behavior, and
 | `/metadata` | GET | App metadata, scorer policy, artifact names, runtime limits |
 | `/recommendations` | POST | Primary recommendation endpoint |
 | `/v1/recommend` | POST | Backward-compatible recommendation endpoint |
+| `/v1/explain` | POST | Generate explanations for recommended items |
+| `/explanations/recommendations` | POST | Backward-compatible explanation endpoint alias |
 | `/recommendations/{user_id}` | GET | Convenience wrapper around recommendation request |
 | `/users/{user_id}/history` | GET | Recent user history capped to 100 rows |
 
@@ -39,6 +43,7 @@ Step 6B also adds contract-compatible aliases, cold-start fallback behavior, and
 - Health aliases: `/health` and `/healthz` are equivalent.
 - Readiness aliases: `/ready` and `/readyz` are equivalent.
 - Recommendation aliases: `/recommendations` and `/v1/recommend` use the same request normalization and response schema.
+- Explanation aliases: `/v1/explain` and `/explanations/recommendations` use the same request normalization and response schema.
 
 ## Request Schema Compatibility
 
@@ -51,6 +56,9 @@ The recommendation request accepts both snake_case and camelCase aliases:
 - `include_debug` or `includeDebug`
 - `allow_cold_start` or `allowColdStart`
 - `candidate_top_k` or `candidateTopK`
+- `include_explanations` or `includeExplanations`
+- `explanation_style` or `explanationStyle` (`concise` or `detailed`)
+- `max_explanation_items` or `maxExplanationItems`
 
 Validation and identity rules:
 
@@ -68,6 +76,8 @@ Validation and identity rules:
   "k": 10,
   "cold_start": false,
   "scorer_policy": "ranker_topk_popularity_backfill",
+  "explanation_status": "generated",
+  "overall_explanation": "Top picks combine your strong Drama/Crime affinity with high ranker confidence.",
   "recommendations": [
     {
       "movieId": 318,
@@ -80,12 +90,34 @@ Validation and identity rules:
       "ranker_score": 0.84,
       "popularity_score": 0.71,
       "rank_position": 1,
-      "scorer_policy": "ranker_topk_popularity_backfill"
+      "scorer_policy": "ranker_topk_popularity_backfill",
+      "explanation": "Strong Drama/Crime overlap with your recent history and high combined scoring support this top rank."
     }
   ],
   "debug": null
 }
 ```
+
+`explanation_status` values:
+
+- `disabled`: explanation generation not requested or globally disabled
+- `generated`: explanations successfully generated
+- `unavailable`: Ollama unavailable while fail-open kept recommendations intact
+- `failed`: unexpected explanation error while fail-open kept recommendations intact
+
+## Explanation Endpoint Request Example
+
+```json
+{
+  "user_id": 709,
+  "top_k": 10,
+  "style": "concise",
+  "max_explanation_items": 5,
+  "include_debug": false
+}
+```
+
+`/v1/explain` and `/explanations/recommendations` can also accept `recommendation_items` to explain a precomputed list without rerunning retrieval/ranking.
 
 ## Cold-Start Behavior
 
@@ -111,7 +143,7 @@ Cold-start response rows include:
 
 ## Local Validation Script
 
-Run full contract validation against a live server:
+Run full contract validation (including explanation checks) against a live server:
 
 ```powershell
 uv run python scripts/validate_serving_api.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
@@ -122,6 +154,18 @@ Outputs:
 - pass/fail table per check
 - per-endpoint latencies
 - JSON report at `artifacts/reports/serving_api_validation.json`
+
+Run targeted Ollama explanation validation:
+
+```powershell
+uv run python scripts/validate_ollama_explanations.py --base-url http://127.0.0.1:8000 --ollama-url http://127.0.0.1:11434 --known-user-idx 0 --k 10
+```
+
+Outputs:
+
+- pass/fail table focused on explanation flow
+- Ollama health and configured model presence checks
+- JSON report at `artifacts/reports/ollama_explanation_validation.json`
 
 ## Local Latency Benchmark Script
 
@@ -162,7 +206,7 @@ Detailed Docker runbook:
 
 ## Known Limitations
 
-- no Ollama explanations yet
+- Ollama explanations require a running local Ollama daemon and installed models
 - local Docker only
 - no cloud deployment yet
 - no authentication

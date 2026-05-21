@@ -49,7 +49,7 @@ Implemented in Step 5 (neural re-ranker):
 - Ranker train/eval scripts with MLflow logging and checkpointing
 - Ranker-vs-residual comparison and acceptance checker tooling
 
-Implemented in Step 6 (FastAPI serving layer):
+Implemented in Step 6/7B (FastAPI serving layer + local explanations):
 
 - Typed serving config (`configs/serving.yaml`) and runtime app wiring
 - Artifact registry for residual retriever, FAISS bundle, and neural ranker
@@ -58,14 +58,15 @@ Implemented in Step 6 (FastAPI serving layer):
 - Cold-start popularity fallback behavior with explicit `cold_start` response flag
 - Request alias support for snake_case and camelCase payloads
 - Typed API schemas and structured error responses
+- Optional local Ollama explanation generation with fail-open behavior
+- Explanation-aware request fields (`include_explanations`, `explanation_style`, `max_explanation_items`)
+- Explanation status/output fields (`explanation_status`, `overall_explanation`, per-item `explanation`)
+- Dedicated explanation endpoints (`/v1/explain`, `/explanations/recommendations`)
 - Local runtime helper (`scripts/run_api.py`) and smoke test (`scripts/smoke_test_api.py`)
 - Full API validation script (`scripts/validate_serving_api.py`) with JSON report output
+- Ollama explanation validation script (`scripts/validate_ollama_explanations.py`) with JSON report output
 - Local latency benchmark script (`scripts/benchmark_serving_api.py`) with p50/p95/max summaries
 - Serving-focused test coverage for config, registry, scorer, errors, and API behavior
-
-Not yet implemented in this step:
-
-- Ollama explanation endpoints
 
 ## Dataset Note
 
@@ -225,6 +226,24 @@ Contract validation:
 uv run python scripts/validate_serving_api.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
 ```
 
+Step 7B local Ollama setup (separate terminal):
+
+```powershell
+ollama serve
+ollama list
+```
+
+Expected models:
+
+- `qwen3:4b`
+- `qwen3-embedding:0.6b`
+
+Step 7B Ollama explanation validation:
+
+```powershell
+uv run python scripts/validate_ollama_explanations.py --base-url http://127.0.0.1:8000 --ollama-url http://127.0.0.1:11434 --known-user-idx 0 --k 10
+```
+
 Latency benchmark:
 
 ```powershell
@@ -235,6 +254,7 @@ Serving workflow details:
 
 - `docs/serving_api.md`
 - `docs/docker_local.md`
+- `docs/ollama_explanations.md`
 
 ## Step 7A Docker Local Packaging Commands
 
@@ -478,7 +498,7 @@ Do not commit generated data or experiment artifacts:
 Transformer limitations currently in scope:
 
 - CL retraining remains experimental and is not part of serving
-- no Ollama explanation endpoints yet
+- Ollama explanations require local Ollama runtime and configured models
 - local Docker packaging only (no cloud targets)
 - no cloud deployment yet
 - no authentication
