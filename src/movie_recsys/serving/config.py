@@ -62,6 +62,22 @@ class ServingRuntimeConfig(BaseModel):
     sample_data: bool = True
 
 
+class ServingExplanationsConfig(BaseModel):
+    """Optional explanation generation settings for serving endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    provider: str = "ollama"
+    base_url: str = "http://127.0.0.1:11434"
+    chat_model: str = "qwen3:4b"
+    embedding_model: str = "qwen3-embedding:0.6b"
+    timeout_seconds: float = 30.0
+    temperature: float = 0.2
+    max_items: int = 10
+    fail_open: bool = True
+
+
 class ServingConfig(BaseModel):
     """Top-level serving configuration."""
 
@@ -73,6 +89,7 @@ class ServingConfig(BaseModel):
     scoring: ServingScoringConfig = ServingScoringConfig()
     api: ServingApiConfig = ServingApiConfig()
     runtime: ServingRuntimeConfig = ServingRuntimeConfig()
+    explanations: ServingExplanationsConfig = ServingExplanationsConfig()
 
 
 def _resolve_path(path_like: str | Path) -> Path:
@@ -141,6 +158,12 @@ def load_serving_config(config_path: str | Path = "configs/serving.yaml") -> Ser
         raise ValueError(msg)
     runtime = ServingRuntimeConfig.model_validate(runtime_raw)
 
+    explanations_raw = raw.get("explanations", {})
+    if not isinstance(explanations_raw, dict):
+        msg = "Expected 'explanations' object in serving config"
+        raise ValueError(msg)
+    explanations = ServingExplanationsConfig.model_validate(explanations_raw)
+
     app_name = str(raw.get("app_name", "MovieLens Two-Tower Recommender API"))
     environment = str(raw.get("environment", "local"))
 
@@ -151,4 +174,5 @@ def load_serving_config(config_path: str | Path = "configs/serving.yaml") -> Ser
         scoring=scoring,
         api=api,
         runtime=runtime,
+        explanations=explanations,
     )

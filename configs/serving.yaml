@@ -28,3 +28,14 @@ api:
   host: 127.0.0.1
   port: 8000
   log_level: info
+
+explanations:
+  enabled: true
+  provider: ollama
+  base_url: http://127.0.0.1:11434
+  chat_model: qwen3:4b
+  embedding_model: qwen3-embedding:0.6b
+  timeout_seconds: 30
+  temperature: 0.2
+  max_items: 10
+  fail_open: true
