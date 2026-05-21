@@ -206,18 +206,7 @@ Key settings:
 - residual sample val eval: `http://127.0.0.1:5000/#/experiments/1/runs/2015307a14b14e9a922269be082091aa`
 - residual sample test eval: `http://127.0.0.1:5000/#/experiments/1/runs/f77c96a712f04439b5637f72f95dda32`
 
-## Metrics Table (Fill After Runs)
-
-| Split | Model | HR@10 | MRR@10 | NDCG@10 | Recall@50 |
-|---|---|---:|---:|---:|---:|
-| val | popularity | - | - | - | - |
-| val | baseline | - | - | - | - |
-| val | transformer | - | - | - | - |
-| val | residual_transformer | - | - | - | - |
-| test | popularity | - | - | - | - |
-| test | baseline | - | - | - | - |
-| test | transformer | - | - | - | - |
-| test | residual_transformer | - | - | - | - |
+Final full-data metrics are tracked in `docs/evidence.md` and `artifacts/reports/residual_transformer_full_summary.json`.
 
 ## Contrastive Decision Snapshot
 
@@ -231,5 +220,6 @@ Key settings:
 
 ## Current Limitations
 
-- no FastAPI API layer yet
-- no Ollama explanation endpoints yet
+- transformer-only retrieval is not the production path; residual transformer is the approved backbone
+- CL residual retriever remains experimental and is not promoted to production
+- online serving, Docker packaging, and optional local Ollama explanations are documented in Step 6/7 docs

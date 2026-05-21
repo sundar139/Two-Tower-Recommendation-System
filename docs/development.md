@@ -9,7 +9,17 @@
 Setup:
 
 ```powershell
+Copy-Item env.example .env -Force
 uv sync --extra dev
+```
+
+Quality gates:
+
+```powershell
+uv run python verify.py
+uv run ruff check .
+uv run mypy src
+uv run pytest -q
 ```
 
 ## PyTorch CUDA Note

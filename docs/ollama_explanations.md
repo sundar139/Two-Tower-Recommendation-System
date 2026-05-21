@@ -31,10 +31,14 @@ Set in `env.example` (copy to `.env` for local runs):
 - `OLLAMA_BASE_URL=http://127.0.0.1:11434`
 - `OLLAMA_CHAT_MODEL=qwen3:4b`
 - `OLLAMA_EMBEDDING_MODEL=qwen3-embedding:0.6b`
-- `OLLAMA_EXPLANATION_TIMEOUT_SECONDS=30`
+- `OLLAMA_EXPLANATION_TIMEOUT_SECONDS=120`
 - `OLLAMA_EXPLANATION_TEMPERATURE=0.2`
 - `OLLAMA_EXPLANATION_MAX_ITEMS=10`
 - `OLLAMA_EXPLANATION_ENABLED=true`
+
+Serving runtime note:
+
+- `configs/serving.yaml` currently uses `explanations.max_items: 3` for API validation parity.
 
 ## 4. Start Ollama
 
@@ -152,3 +156,4 @@ Generated reports:
 - no streaming explanation responses yet
 - no frontend/UI yet
 - no Dockerized Ollama sidecar/service in this step
+- Docker packaging does not include Ollama; containerized explanation flow requires host Ollama reachability

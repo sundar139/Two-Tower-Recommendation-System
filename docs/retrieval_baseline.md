@@ -1,5 +1,8 @@
 # Plain Two-Tower Retrieval Baseline
 
+This document captures the Step 2 baseline workflow. For final full-project outcomes,
+use the consolidated evidence in `docs/evidence.md`.
+
 ## Why Start With A Plain Baseline
 
 The first modeling baseline is intentionally simple and deterministic:
@@ -87,15 +90,17 @@ The overfit smoke test checks whether loss clearly trends down over the first ~1
 It does not require strictly monotonic per-step decrease, because mini-batch optimization is noisy
 and short-term increases are normal. Diagnostic fields include both raw and smoothed trend signals.
 
-## Latest Sample Comparison Snapshot
+## Historical Sample Snapshot (Not Final)
 
-Current sample validation NDCG@10:
+These sample metrics were used for early-stage gating and should not be interpreted as
+the final production result table:
 
 - popularity: `0.024347`
 - baseline two-tower: `0.025047`
 - transformer retriever (stable): `0.018203`
 
-The plain baseline remains the approved quality gate for moving toward later research steps.
+The plain baseline remained the quality gate that enabled transformer and residual work.
+The final production retrieval backbone is the residual transformer documented separately.
 
 ## Step 2 Validation Commands
 
