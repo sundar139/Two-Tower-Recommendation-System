@@ -9,7 +9,6 @@ import typer
 import yaml
 
 from movie_recsys.constants import PROJECT_ROOT
-from movie_recsys.serving.config import load_serving_config
 
 app = typer.Typer(add_completion=False)
 
@@ -33,18 +32,43 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _relative_display(path: Path, root: Path) -> str:
     resolved = path.resolve()
     try:
-        return str(resolved.relative_to(root))
+        return resolved.relative_to(root).as_posix()
     except ValueError:
-        return str(resolved)
+        return resolved.as_posix()
 
 
 def resolve_required_paths(config_path: Path, root: Path = PROJECT_ROOT) -> list[tuple[str, Path]]:
     """Build the full list of required files for local Docker serving."""
 
     serving_config_path = _resolve_path(config_path, root)
-    serving_config = load_serving_config(serving_config_path)
+    serving_payload = _load_yaml(serving_config_path)
+    serving_paths = serving_payload.get("paths", {})
+    if not isinstance(serving_paths, dict):
+        msg = "Expected 'paths' object in serving config"
+        raise ValueError(msg)
 
-    retrieval_payload = _load_yaml(serving_config.paths.retrieval_config)
+    retrieval_config = _resolve_path(
+        serving_paths.get("retrieval_config", "configs/transformer_retrieval_residual.yaml"),
+        root,
+    )
+    ranker_config = _resolve_path(
+        serving_paths.get("ranker_config", "configs/ranker.yaml"),
+        root,
+    )
+    faiss_dir = _resolve_path(serving_paths.get("faiss_dir", "artifacts/faiss"), root)
+    residual_checkpoint = _resolve_path(
+        serving_paths.get(
+            "residual_checkpoint",
+            "artifacts/models/best_residual_transformer_retriever.pt",
+        ),
+        root,
+    )
+    ranker_checkpoint = _resolve_path(
+        serving_paths.get("ranker_checkpoint", "artifacts/models/best_neural_ranker.pt"),
+        root,
+    )
+
+    retrieval_payload = _load_yaml(retrieval_config)
     retrieval_paths = retrieval_payload.get("paths", {})
     retrieval_files = retrieval_payload.get("files", {})
     if not isinstance(retrieval_paths, dict):
@@ -61,13 +85,13 @@ def resolve_required_paths(config_path: Path, root: Path = PROJECT_ROOT) -> list
 
     return [
         ("serving config", serving_config_path),
-        ("ranker config", serving_config.paths.ranker_config),
-        ("retrieval config", serving_config.paths.retrieval_config),
-        ("residual checkpoint", serving_config.paths.residual_checkpoint),
-        ("ranker checkpoint", serving_config.paths.ranker_checkpoint),
-        ("faiss index", serving_config.paths.faiss_dir / "index.faiss"),
-        ("faiss metadata", serving_config.paths.faiss_dir / "index_metadata.json"),
-        ("faiss item mapping", serving_config.paths.faiss_dir / "item_idx_mapping.parquet"),
+        ("ranker config", ranker_config),
+        ("retrieval config", retrieval_config),
+        ("residual checkpoint", residual_checkpoint),
+        ("ranker checkpoint", ranker_checkpoint),
+        ("faiss index", faiss_dir / "index.faiss"),
+        ("faiss metadata", faiss_dir / "index_metadata.json"),
+        ("faiss item mapping", faiss_dir / "item_idx_mapping.parquet"),
         (
             "items parquet",
             processed_data_dir / str(retrieval_files.get("items", "items.parquet")),
