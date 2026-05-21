@@ -1,504 +1,161 @@
-# MovieLens Two-Tower Recommender
+# MovieLens-25M Two-Tower Recommender System
 
-Production-grade repository for baseline and transformer two-tower retrieval on MovieLens-25M.
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
+![FAISS](https://img.shields.io/badge/FAISS-005571)
+![MLflow](https://img.shields.io/badge/MLflow-0194E2?logo=mlflow&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![Ollama](https://img.shields.io/badge/Ollama-000000)
+![Tests Passing](https://img.shields.io/badge/Tests-Passing-brightgreen)
+![Type Checked](https://img.shields.io/badge/Type_Checked-mypy-brightgreen)
 
-## Current Scope
+## Executive Summary
 
-Implemented in this step:
+This repository implements a production-oriented MovieLens-25M recommendation stack with a two-stage architecture: residual transformer retrieval for candidate generation, neural ranking for reordering, and a recall-constrained production scorer that improves ranking quality over popularity while preserving Recall@50 safety. The system is shipped with a local FastAPI service, Docker local packaging, and optional local Ollama explanations that are intentionally fail-open and do not affect recommendation order.
 
-- Environment setup with Python 3.12 + uv
-- Deterministic MovieLens download tooling
-- Polars-based preprocessing and feature generation
-- Chronological per-user train/validation/test splitting
-- Data and environment validation checks
-- Unit tests for preprocessing, features, splits, and safety constraints
+## Why This Project Matters
 
-Implemented in Step 2 (plain retrieval baseline):
+- Real recommender systems commonly split into retrieval (fast candidate generation) and ranking (precision-focused reordering).
+- Popularity is a strong baseline that many experimental models fail to beat in reliable production settings.
+- This project does not optimize only for NDCG; it compares against popularity and explicitly enforces a Recall@50 guard before promotion.
 
-- Popularity baseline retrieval evaluator
-- Plain two-tower retriever with in-batch negatives
-- Retrieval Dataset/DataLoader with leakage-safe history windows
-- Offline metrics: HR@10, MRR@10, NDCG@10, Recall@50
-- FAISS flat inner-product index export/reload/search
-- MLflow logging for training, evaluation, and FAISS export runs
+## Architecture Overview
 
-Implemented in Step 3 (transformer retrieval encoder):
+```mermaid
+flowchart LR
+    A[MovieLens Raw Data] --> B[Data Pipeline and Feature Engineering]
+    B --> C[Residual Transformer Retriever]
+    C --> D[FAISS Top-200 Candidate Retrieval]
+    D --> E[Neural Ranker]
+    E --> F[Recall-Constrained Production Scorer]
+    F --> G[FastAPI Serving]
+    G --> H[Optional Ollama Explanations]
+```
 
-- Custom transformer user sequence encoder with causal self-attention
-- Padding-aware and causal masking to prevent leakage
-- Configurable sequence pooling (`last` or `mean`)
-- TransformerRetriever integrated into train/eval/export workflow
-- Residual transformer retriever with gated baseline + transformer blending
-- Baseline-checkpoint initialization flow for residual retriever
-- Residual sample ablation and four-way comparison tooling
+## Final Results (Full Data)
 
-Implemented in Step 4 (contrastive residual enhancement):
+All rows below are offline full-data evaluations with split context included.
 
-- CL residual transformer retriever (`cl_residual_transformer`)
-- Sequence augmentations for two-view user contrastive learning
-- Symmetric InfoNCE helpers for user/item/alignment objectives
-- CL training integration with decomposed loss logging
-- Contrastive sample ablation and acceptance checker tooling
+| Stage | Split | HR@10 | MRR@10 | NDCG@10 | Recall@50 |
+|---|---|---:|---:|---:|---:|
+| Popularity baseline | Validation | 0.385364 | 0.230085 | 0.266328 | 0.711440 |
+| Popularity baseline | Test | 0.373635 | 0.228624 | 0.262527 | 0.679510 |
+| Residual retriever (retrieval-only) | Validation | 0.090569 | 0.031410 | 0.045040 | 0.248491 |
+| Residual retriever (retrieval-only) | Test | 0.067519 | 0.022010 | 0.032480 | 0.206234 |
+| Neural ranker (ranker-only) | Validation | 0.281478 | 0.150470 | 0.181151 | 0.532570 |
+| Neural ranker (ranker-only) | Test | 0.294949 | 0.154198 | 0.187112 | 0.575556 |
+| Selected production scorer | Validation | 0.435364 | 0.273246 | 0.311523 | 0.729658 |
+| Selected production scorer | Test | 0.447748 | 0.277436 | 0.317591 | 0.712374 |
 
-Implemented in Step 5 (neural re-ranker):
+## Approved Production Scorer
 
-- Residual top-200 candidate generation for train/val/test ranker queries
-- Deterministic candidate validation and metadata signature logging
-- Ranker feature engineering over retrieval/user/item/interaction signals
-- MLP neural ranker with BCE/BPR/hybrid loss support
-- Ranker train/eval scripts with MLflow logging and checkpointing
-- Ranker-vs-residual comparison and acceptance checker tooling
+- policy: `ranker_topk_popularity_backfill`
+- alpha: `1.0`
+- beta: `0.1`
+- gamma: `0.0`
+- top_k_focus: `20`
 
-Implemented in Step 6/7B (FastAPI serving layer + local explanations):
+Why this was selected:
 
-- Typed serving config (`configs/serving.yaml`) and runtime app wiring
-- Artifact registry for residual retriever, FAISS bundle, and neural ranker
-- Recommendation service with deterministic two-stage scorer policy application
-- Contract-aligned endpoint aliases (`/health`, `/ready`, `/metadata`, `/recommendations`, `/users/{user_id}/history`) with backward-compatible legacy paths
-- Cold-start popularity fallback behavior with explicit `cold_start` response flag
-- Request alias support for snake_case and camelCase payloads
-- Typed API schemas and structured error responses
-- Optional local Ollama explanation generation with fail-open behavior
-- Explanation-aware request fields (`include_explanations`, `explanation_style`, `max_explanation_items`)
-- Explanation status/output fields (`explanation_status`, `overall_explanation`, per-item `explanation`)
-- Dedicated explanation endpoints (`/v1/explain`, `/explanations/recommendations`)
-- Local runtime helper (`scripts/run_api.py`) and smoke test (`scripts/smoke_test_api.py`)
-- Full API validation script (`scripts/validate_serving_api.py`) with JSON report output
-- Ollama explanation validation script (`scripts/validate_ollama_explanations.py`) with JSON report output
-- Local latency benchmark script (`scripts/benchmark_serving_api.py`) with p50/p95/max summaries
-- Serving-focused test coverage for config, registry, scorer, errors, and API behavior
+- It beats popularity on NDCG@10 (validation and test).
+- It preserves and improves Recall@50 against popularity under the acceptance guard.
 
-## Dataset Note
+## Serving Results
 
-Raw MovieLens archives and extracted CSV files are not committed. Processed artifacts are also excluded from version control.
+- Core API validation: `18/18` checks passed.
+- Local serving benchmark (`50` requests):
+  - p50 latency: `29.70 ms`
+  - p95 latency: `35.05 ms`
+  - max latency: `36.64 ms`
+- Docker local smoke test: `6/6` checks passed.
+- Ollama explanation validation: `9/9` checks passed.
+- Explanation generation is intentionally optional and slower because local LLM generation is post-processing.
 
-## Windows PowerShell Setup
+## Quickstart
+
+### 1) Setup
 
 ```powershell
 Copy-Item env.example .env -Force
 uv sync --extra dev
 ```
 
-## Download MovieLens-25M
-
-```powershell
-uv run python scripts/download_movielens.py --config configs/data.yaml
-```
-
-Checksum validation is supported and automatically enforced when `expected_checksum`
-is configured in `configs/data.yaml`.
-
-## Prepare Sample Data
-
-```powershell
-uv run python scripts/prepare_data.py --config configs/data.yaml --sample-users 1000 --seed 42 --force
-```
-
-## Prepare Full Data
-
-```powershell
-uv run python scripts/prepare_data.py --config configs/data.yaml --force
-```
-
-## Verify Environment
+### 2) Verify
 
 ```powershell
 uv run python verify.py
-uv run python scripts/verify_environment.py
+uv run ruff check .
+uv run mypy src
+uv run pytest -q
 ```
 
-## MLflow UI (SQLite Backend)
-
-Metadata backend: `sqlite:///mlflow.db`
-
-Artifacts: local `./mlruns` (ignored by git)
-
-Start UI directly:
-
-```powershell
-uvx mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
-```
-
-Or via project helper:
+### 3) Start MLflow (SQLite backend)
 
 ```powershell
 uv run python scripts/start_mlflow_ui.py --run
 ```
 
-Windows note: if `uvx mlflow ui` emits WinError 10022/worker noise, prefer the helper command above.
-
-UI URL:
-
-`http://127.0.0.1:5000`
-
-Training/evaluation/export scripts print:
-
-- `mlflow_tracking_uri`
-- `mlflow_experiment_name`
-- `mlflow_run_id`
-- `mlflow_ui_url`
-- `mlflow_run_url`
-
-## Step 2 Retrieval Commands
-
-```powershell
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample --model-type baseline
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val --sample
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample --model-type baseline
-```
-
-## Step 3 Transformer Commands
-
-```powershell
-uv run python scripts/diagnose_transformer_retriever.py --config configs/transformer_retrieval_stable.yaml --sample
-uv run python scripts/run_transformer_ablation.py --sample
-uv run python scripts/train_retriever.py --config configs/transformer_retrieval_stable.yaml --sample --model-type transformer
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split val --sample
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_stable.yaml --model transformer --split test --sample
-uv run python scripts/train_retriever.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer --init-from-baseline artifacts/models/best_baseline_retriever.pt
-uv run python scripts/run_residual_transformer_ablation.py --sample
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split val --sample
-uv run python scripts/evaluate_retriever.py --config configs/transformer_retrieval_residual.yaml --model residual_transformer --split test --sample
-uv run python scripts/compare_retrievers.py --sample
-uv run python scripts/export_faiss_index.py --config configs/transformer_retrieval_residual.yaml --sample --model-type residual_transformer
-```
-
-## Step 4 Contrastive Commands
-
-```powershell
-uv run python scripts/run_contrastive_ablation.py --sample
-uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
-uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split val --sample
-uv run python scripts/evaluate_retriever.py --config configs/cl_retrieval.yaml --model cl_residual_transformer --split test --sample
-uv run python scripts/export_faiss_index.py --config configs/cl_retrieval.yaml --sample --model-type cl_residual_transformer
-uv run python scripts/compare_retrievers.py --sample --cl-config configs/cl_retrieval.yaml
-uv run python scripts/check_contrastive_acceptance.py --summary artifacts/reports/contrastive_ablation_sample.json --sample
-```
-
-Run full-data CL only after sample acceptance passes:
-
-```powershell
-uv run python scripts/train_retriever.py --config configs/cl_retrieval.yaml --model-type cl_residual_transformer --init-from-residual artifacts/models/best_residual_transformer_retriever.pt
-```
-
-## Step 5 Neural Ranker Commands
-
-Sample workflow:
-
-```powershell
-uv run python scripts/generate_ranker_candidates.py --sample
-uv run python scripts/train_ranker.py --sample
-uv run python scripts/evaluate_ranker.py --sample --split val
-uv run python scripts/evaluate_ranker.py --sample --split test
-uv run python scripts/compare_retrieval_ranker.py --sample
-uv run python scripts/check_ranker_acceptance.py --sample
-```
-
-Run full-data ranker only after sample acceptance passes:
-
-```powershell
-uv run python scripts/generate_ranker_candidates.py
-uv run python scripts/train_ranker.py
-uv run python scripts/evaluate_ranker.py --split val
-uv run python scripts/evaluate_ranker.py --split test
-uv run python scripts/compare_retrieval_ranker.py
-uv run python scripts/check_ranker_acceptance.py
-```
-
-## Step 6 FastAPI Serving Commands
-
-Run API:
+### 4) Run API Locally
 
 ```powershell
 uv run python scripts/run_api.py --config configs/serving.yaml --host 127.0.0.1 --port 8000
 ```
 
-Smoke test:
+### 5) Validate Serving
 
 ```powershell
-uv run python scripts/smoke_test_api.py --base-url http://127.0.0.1:8000 --user-idx 0 --top-k 20 --require-ready
+uv run python scripts/validate_serving_api.py --base-url http://127.0.0.1:8000 --timeout-seconds 120 --max-explanation-items 3
 ```
 
-Contract validation:
-
-```powershell
-uv run python scripts/validate_serving_api.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
-```
-
-Step 7B local Ollama setup (separate terminal):
-
-```powershell
-ollama serve
-ollama list
-```
-
-Expected models:
-
-- `qwen3:4b`
-- `qwen3-embedding:0.6b`
-
-Step 7B Ollama explanation validation:
-
-```powershell
-uv run python scripts/validate_ollama_explanations.py --base-url http://127.0.0.1:8000 --ollama-url http://127.0.0.1:11434 --known-user-idx 0 --k 10
-```
-
-Latency benchmark:
-
-```powershell
-uv run python scripts/benchmark_serving_api.py --base-url http://127.0.0.1:8000 --num-users 50 --k 10
-```
-
-Serving workflow details:
-
-- `docs/serving_api.md`
-- `docs/docker_local.md`
-- `docs/ollama_explanations.md`
-
-## Step 7A Docker Local Packaging Commands
-
-Artifact preflight:
+### 6) Run Docker (Local)
 
 ```powershell
 uv run python scripts/check_docker_artifacts.py --config configs/serving.yaml
-```
-
-Build image:
-
-```powershell
 docker compose build
-```
-
-Run API in Docker:
-
-```powershell
 docker compose up recommender-api
 ```
 
-Run Docker smoke test (second terminal):
+### 7) Run Ollama Explanation Validation
 
 ```powershell
-uv run python scripts/docker_smoke_test.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
+uv run python scripts/validate_ollama_explanations.py --base-url http://127.0.0.1:8000 --ollama-url http://127.0.0.1:11434 --timeout-seconds 180 --max-explanation-items 3
 ```
 
-## Full Residual Validation Commands
+## Repository Structure
 
-```powershell
-uv run python scripts/run_full_residual_training.py --max-runtime-hours 4
+```text
+configs/                 # training, ranking, and serving configs
+data/                    # raw/interim/processed data (gitkeeps tracked)
+docs/                    # architecture, evidence, workflow docs
+scripts/                 # reproducible pipeline, training, eval, serving scripts
+src/                     # core recommender and serving implementation
+tests/                   # unit and integration tests
+artifacts/               # generated model/index/report outputs (git-ignored)
+mlruns/                  # MLflow artifacts (git-ignored)
 ```
 
-Resume from checkpoint:
+## Reproducibility
 
-```powershell
-uv run python scripts/run_full_residual_training.py --resume-from artifacts/models/checkpoints/residual_transformer_epoch_3.pt --max-runtime-hours 4
-```
+- `env.example` provides reproducible local configuration defaults.
+- `uv` is used for deterministic dependency and command execution.
+- MLflow tracking uses SQLite metadata (`mlflow.db`) and local artifact storage (`mlruns/`).
+- Docker service mounts local artifacts/configs for reproducible local serving with approved checkpoints.
+- Generated artifacts and caches are excluded from Git; only data directory `.gitkeep` sentinels are tracked.
 
-Evaluation-only mode (skip train and use latest residual checkpoint):
+## Limitations
 
-```powershell
-uv run python scripts/run_full_residual_training.py --evaluate-only
-```
+- CL retriever remains experimental and is not promoted to production.
+- Ollama explanations are optional and can be slow due to local model generation latency.
+- Docker image currently mounts local artifacts rather than baking model binaries.
+- No cloud deployment, authentication, or frontend layer is implemented yet.
+- Offline MovieLens quality does not guarantee online user satisfaction in production environments.
 
-Acceptance checker:
+## Project Status
 
-```powershell
-uv run python scripts/check_residual_acceptance.py --summary artifacts/reports/full_residual_transformer_summary.json
-```
-
-## Contrastive Stabilization Status
-
-First CL attempt outcome:
-
-- The initial broad CL attempt did not produce a stable promotion decision and was superseded by a focused second-round matrix with stricter acceptance checks.
-
-Second focused CL sample ablation (latest):
-
-- best trial: `focused_proj_warm_anchor_u050_i020_t007_a001`
-- best trial val NDCG@10: `0.023174`
-- popularity val NDCG@10: `0.024347`
-- residual val NDCG@10: `0.020215`
-
-Acceptance result from `scripts/check_contrastive_acceptance.py --summary artifacts/reports/contrastive_ablation_sample.json --sample`:
-
-- `acceptance_passed: false`
-- `full_data_cl_allowed: false`
-- failure reason: no primary acceptance rule passed
-- guard checks: FAISS parity, recall collapse guard, and finite-loss checks all passed
-
-Decision:
-
-- CL remains experimental.
-- Residual transformer remains the production retrieval backbone.
-- Full-data CL is blocked until a future sample acceptance run passes.
-- Neural ranker work should continue using residual-transformer retrieval artifacts.
-
-## Neural Ranker Full-Data Status (Latest)
-
-Step 5B: Full-Data Neural Ranker Validation completed.
-
-The full-data neural ranker pipeline was validated using residual transformer retrieval candidates. Candidate diagnostics passed integrity checks, and full validation/test ranker evaluation completed successfully.
-
-Full validation results:
-
-- Ranker NDCG@10: `0.181151`
-- Residual retriever NDCG@10: `0.045040`
-- Delta: `+0.136110`
-- Query count: `161,821`
-- Row count: `32,452,397`
-
-Full test results:
-
-- Ranker NDCG@10: `0.187112`
-- Residual retriever NDCG@10: `0.032480`
-- Delta: `+0.154633`
-- Query count: `161,821`
-- Row count: `32,461,176`
-
-Acceptance passed against the residual retrieval baseline. Popularity still outperformed ranker-only NDCG@10 on both splits, so Step 5C ran a popularity-aware scorer audit before any serving/API work.
-
-Step 5C: Production Scorer Selection and Popularity-Aware Ranker Audit completed.
-
-- normalization: query-wise min-max (split-local; no cross-split leakage)
-- validation-only weight selection: test split was not used for weight search
-- evaluated policies: `popularity_only`, `residual_only`, `ranker_only`, `ranker_plus_popularity`, `ranker_plus_popularity_plus_residual`, `ranker_topk_popularity_backfill`
-- manual grid (Step 5C): `alpha=[0.5, 0.7, 0.85, 1.0]`, `beta=[0.0, 0.1, 0.2, 0.3, 0.5]`, `gamma=[0.0, 0.1, 0.2, 0.3]`
-
-Selected scorer (validation winner):
-
-- policy: `ranker_plus_popularity`
-- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`
-- validation: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.597203`
-- test: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.637241`
-
-Production scorer acceptance (`scripts/check_production_scorer_acceptance.py`):
-
-- `acceptance_passed: false`
-- primary popularity-comparison rules: passed
-- failed guard: `recall50_relative_drop_vs_popularity_le_5pct`
-- recall relative drop vs popularity: val `0.160572`, test `0.062205`
-- Step 6 FastAPI serving unblocked: `false`
-
-Reports:
-
-- `artifacts/reports/production_scorer_selection.json`
-- `artifacts/reports/production_scorer_selection.md`
-- `artifacts/reports/production_scorer_acceptance.json`
-- `docs/production_scorer.md`
-
-Step 5D: Recall-Constrained Production Scorer Tuning completed.
-
-- objective: enforce validation recall guard before scorer selection (`Recall@50 >= 0.95 * popularity Recall@50`)
-- recall constraint value: `0.675868`
-- selected_by_validation_only: `true`
-- candidates_passing_recall_constraint: `64`
-- popularity_safe_fallback_used: `false`
-
-Expanded recall-aware grid:
-
-- `ranker_plus_popularity`: `alpha=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0]`, `beta=[0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]`
-- `ranker_plus_popularity_plus_residual`: `alpha=[0.1, 0.2, 0.3, 0.5, 0.7, 1.0]`, `beta=[0.2, 0.5, 1.0, 1.5, 2.0]`, `gamma=[0.0, 0.05, 0.1, 0.2]`
-- `ranker_topk_popularity_backfill`: `top_k_focus=[10, 20, 30, 50]` (deterministic two-stage policy)
-
-Selected scorer (Step 5D validation winner):
-
-- policy: `ranker_topk_popularity_backfill`
-- weights: `alpha=1.0`, `beta=0.1`, `gamma=0.0`, `top_k_focus=20`
-- validation: `hr@10=0.435364`, `mrr@10=0.273246`, `ndcg@10=0.311523`, `recall@50=0.729658`
-- test: `hr@10=0.447748`, `mrr@10=0.277436`, `ndcg@10=0.317591`, `recall@50=0.712374`
-
-Step 5D acceptance (`scripts/check_production_scorer_acceptance.py`):
-
-- `acceptance_passed: true`
-- `step6_fastapi_unblocked: true`
-- `step6_unblocked_mode: selected_scorer`
-- recall guard result: passed (`recall50_relative_drop_vs_popularity_le_5pct=true`, val/test drop `0.0`)
-
-## Step 2 Validation Commands
-
-### Sample Validation Commands
-
-```powershell
-Copy-Item env.example .env -Force
-uv run python verify.py
-uv run ruff check .
-uv run mypy src
-uv run pytest -q
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val --sample
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml --sample --model-type baseline
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val --sample
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test --sample
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split test --sample
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --sample --model-type baseline
-git status --short
-git ls-files data artifacts mlruns models .venv mlflow.db
-```
-
-### Full-Data Validation Commands
-
-```powershell
-Copy-Item env.example .env -Force
-uv run python verify.py
-uv run ruff check .
-uv run mypy src
-uv run pytest -q
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split val
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model popularity --split test
-uv run python scripts/train_retriever.py --config configs/retrieval.yaml --model-type baseline
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split val
-uv run python scripts/evaluate_retriever.py --config configs/retrieval.yaml --model baseline --split test
-uv run python scripts/export_faiss_index.py --config configs/retrieval.yaml --model-type baseline
-git status --short
-git ls-files data artifacts mlruns models .venv mlflow.db
-```
-
-## Run Quality Checks
-
-```powershell
-uv run ruff check .
-uv run mypy src
-uv run pytest -q
-```
-
-## Expected Processed Outputs
-
-Default output root: `data/processed/`.
-Sample mode output root: `data/processed/sample/`.
-
-Expected files:
-
-- interactions_train.parquet
-- interactions_val.parquet
-- interactions_test.parquet
-- users.parquet
-- items.parquet
-- user_id_map.parquet
-- item_id_map.parquet
-- user_histories.parquet
-- dataset_stats.json
-
-## Retrieval Metrics
-
-- HR@10: hit-rate at top-10.
-- MRR@10: reciprocal rank at top-10.
-- NDCG@10: position-weighted ranking gain at top-10.
-- Recall@50: recall at top-50.
-
-## Artifact Policy
-
-Do not commit generated data or experiment artifacts:
-
-- `data/raw/ml-25m.zip`, `data/raw/ml-25m/`
-- `data/processed/**` generated outputs
-- `artifacts/**`
-- `mlruns/**`
-- `mlflow.db`
-- model checkpoints and FAISS index files
-
-Transformer limitations currently in scope:
-
-- CL retraining remains experimental and is not part of serving
-- Ollama explanations require local Ollama runtime and configured models
-- local Docker packaging only (no cloud targets)
-- no cloud deployment yet
-- no authentication
+- Retrieval: approved
+- Ranking: approved
+- Serving: approved
+- Docker local packaging: approved
+- Ollama explanation endpoint: approved
+- Final portfolio polish: in progress
