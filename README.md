@@ -30,6 +30,7 @@ An industry-style recommender system that combines residual transformer retrieva
 - [Design Decisions](#design-decisions)
 - [Limitations](#limitations)
 - [Acknowledgements](#acknowledgements)
+- [Author](#author)
 - [License](#license)
 
 ## Overview
@@ -50,10 +51,10 @@ Popularity is a strong baseline on MovieLens. Claims are weak unless they beat p
 
 Approved headline numbers:
 
-- Validation: popularity NDCG@10 `0.2663275394` -> selected scorer NDCG@10 `0.3115227229`
-- Validation: popularity Recall@50 `0.7114404187` -> selected scorer Recall@50 `0.7296580790`
-- Test: popularity NDCG@10 `0.2625267030` -> selected scorer NDCG@10 `0.3175914351`
-- Test: popularity Recall@50 `0.6795100759` -> selected scorer Recall@50 `0.7123735486`
+- Validation: popularity NDCG@10 `0.2663` -> selected scorer NDCG@10 `0.3115`
+- Validation: popularity Recall@50 `0.7114` -> selected scorer Recall@50 `0.7297`
+- Test: popularity NDCG@10 `0.2625` -> selected scorer NDCG@10 `0.3176`
+- Test: popularity Recall@50 `0.6795` -> selected scorer Recall@50 `0.7124`
 - Serving: API validation `18/18`, p50 `29.70 ms`, p95 `35.05 ms`, max `36.64 ms`
 - Docker smoke test `6/6`, Ollama validation `9/9`, explanations generated `3`, explanation latency about `70 to 73 seconds`
 
@@ -98,16 +99,18 @@ flowchart LR
 
 ### B) Final Full-Data Metrics
 
-| Model | Split | HR@10 | MRR@10 | NDCG@10 | Recall@50 |
+| Model / Scorer | Split | HR@10 | MRR@10 | NDCG@10 | Recall@50 |
 |---|---|---:|---:|---:|---:|
-| Popularity baseline | Validation | 0.3853640751 | 0.2300853687 | 0.2663275394 | 0.7114404187 |
-| Popularity baseline | Test | 0.3736350659 | 0.2286240097 | 0.2625267030 | 0.6795100759 |
-| Residual retriever | Validation | N/A | N/A | 0.045040 | 0.248491 |
-| Residual retriever | Test | N/A | N/A | 0.032480 | 0.206234 |
-| Neural ranker | Validation | N/A | N/A | 0.181151 | 0.532570 |
-| Neural ranker | Test | N/A | N/A | 0.187112 | 0.575556 |
-| Selected production scorer | Validation | 0.4353637661 | 0.2732455409 | 0.3115227229 | 0.7296580790 |
-| Selected production scorer | Test | 0.4477478201 | 0.2774359612 | 0.3175914351 | 0.7123735486 |
+| Popularity baseline | Validation | 0.3854 | 0.2301 | 0.2663 | 0.7114 |
+| Popularity baseline | Test | 0.3736 | 0.2286 | 0.2625 | 0.6795 |
+| Residual retriever | Validation | — | — | 0.0450 | 0.2485 |
+| Residual retriever | Test | — | — | 0.0325 | 0.2062 |
+| Neural ranker | Validation | — | — | 0.1812 | 0.5326 |
+| Neural ranker | Test | — | — | 0.1871 | 0.5756 |
+| Selected scorer | Validation | 0.4354 | 0.2732 | 0.3115 | 0.7297 |
+| Selected scorer | Test | 0.4477 | 0.2774 | 0.3176 | 0.7124 |
+
+HR@10 and MRR@10 were not included in the final consolidated report for some intermediate artifacts; NDCG@10 and Recall@50 are shown where available.
 
 Selected production scorer policy:
 
@@ -130,29 +133,20 @@ Note: explanation generation is optional and intentionally post-processing; it d
 
 ## Prerequisites
 
-Operating system:
+| Tool | Version | Notes |
+|---|---|---|
+| Python | 3.12 | Pinned and managed through uv |
+| uv | Latest | Recommended environment and dependency manager |
+| CUDA Toolkit | 12.8 | Optional; useful for GPU training |
+| Ollama | Latest | Required only for local explanation generation |
+| Docker Desktop | Latest | Optional; used for containerized local serving |
+| Git | 2.x | Required for cloning and version control |
 
-- Windows 11 PowerShell tested
-- WSL/Linux likely compatible (commands may need path/shell adjustments)
-
-Tools:
-
-- Python 3.12
-- uv
-- Git
-- Docker Desktop
-- Ollama
-- Optional CUDA-capable GPU for training
-- CPU is sufficient for local API serving when artifacts already exist
-
-Python/project stack:
-
-- PyTorch
-- FastAPI
-- FAISS
-- MLflow
-- Polars / PyArrow
-- scikit-learn and supporting libraries from `pyproject.toml`
+- Windows 11 PowerShell tested.
+- Linux/macOS likely compatible, but commands may need path adjustments.
+- CPU is sufficient for API serving if trained artifacts already exist.
+- GPU is recommended for training.
+- CUDA is not required for serving precomputed artifacts.
 
 Required local Ollama models:
 
@@ -186,6 +180,11 @@ Linux/macOS equivalent env copy:
 
 ```bash
 cp env.example .env
+uv sync --extra dev
+uv run python verify.py
+uv run ruff check .
+uv run mypy src
+uv run pytest -q
 ```
 
 ## Dataset
@@ -253,6 +252,14 @@ uv run python scripts/check_production_scorer_acceptance.py --selection artifact
 
 ### E) Run Local API
 
+The API requires approved local artifacts: processed data, FAISS index, residual retriever checkpoint, neural ranker checkpoint, and serving configuration. Before serving, run:
+
+```powershell
+uv run python scripts/check_docker_artifacts.py --config configs/serving.yaml
+```
+
+This verifies that required artifact paths exist.
+
 ```powershell
 uv run python scripts/run_api.py --config configs/serving.yaml --host 127.0.0.1 --port 8000
 ```
@@ -317,6 +324,29 @@ curl -X POST http://127.0.0.1:8000/recommendations \
   -H "Content-Type: application/json" \
   -d "{\"user_idx\":0,\"k\":10,\"exclude_seen\":true,\"include_debug\":false,\"allow_cold_start\":true}"
 ```
+
+Abbreviated example response:
+
+```json
+{
+  "user_idx": 0,
+  "recommendations": [
+    {
+      "movieId": 4993,
+      "title": "Lord of the Rings: The Fellowship of the Ring, The (2001)",
+      "final_score": 0.9821
+    },
+    {
+      "movieId": 7153,
+      "title": "Lord of the Rings: The Return of the King, The (2003)",
+      "final_score": 0.9764
+    }
+  ],
+  "scorer_policy": "ranker_topk_popularity_backfill"
+}
+```
+
+This is an abbreviated example for readability; actual recommendations vary by user and runtime artifacts.
 
 Recommendations with explanations:
 
@@ -411,16 +441,15 @@ Model checkpoints and index artifacts are large and evolve independently from AP
 
 ## Limitations
 
-- Offline MovieLens evaluation does not prove online business impact.
-- No real-time feedback loop is implemented.
-- No user authentication is included.
-- No cloud deployment pipeline is included.
-- No frontend experience is included.
-- Docker image is local-serving oriented.
-- Ollama explanations can be slow.
-- CL retriever remains experimental.
-- Serving requires local model/index artifacts.
-- Popularity remains a strong signal and is intentionally used in final scoring policy.
+- No online feedback loop: the model is trained offline on historical ratings and does not update from live user interactions. A production system would require periodic retraining or online learning.
+- Offline evaluation only: MovieLens metrics are useful for benchmarking, but they do not prove real-world user satisfaction or business impact.
+- No authentication or user management: the FastAPI service is designed for local demonstration and does not include production-grade access control.
+- No cloud deployment yet: Docker packaging is local-first; cloud deployment would require secrets management, artifact storage, monitoring, and infrastructure configuration.
+- No frontend UI: the project exposes API endpoints and validation scripts, but no web interface is included.
+- Ollama explanations can be slow: local LLM explanations are optional post-processing and do not affect recommendation ranking.
+- CL retriever remains experimental: the contrastive model was implemented and tested, but it was not promoted because it did not satisfy acceptance criteria.
+- Artifacts are required locally: serving depends on processed data, FAISS index files, and trained checkpoints that are intentionally not tracked in Git.
+- Popularity remains important: the final scorer intentionally uses popularity backfill because popularity is a strong baseline on MovieLens-25M.
 
 ## Acknowledgements
 
@@ -430,15 +459,19 @@ Model checkpoints and index artifacts are large and evolve independently from AP
 - FastAPI
 - MLflow
 - Ollama
+- Docker
+- uv
+
+F. Maxwell Harper and Joseph A. Konstan. The MovieLens Datasets: History and Context. ACM Transactions on Interactive Intelligent Systems, 5(4):19:1-19:19, December 2015.
 
 Contrastive-learning note:
 
-The contrastive component was inspired by CL-EPIDTN-style contrastive recommendation ideas, but this repository does not claim a full paper reproduction.
+The contrastive retriever work was inspired by CL-EPIDTN-style contrastive recommendation ideas, but this repository does not claim a full paper reproduction.
 
 ## Author
 
 **Rohith Sundar Jonnalagadda**  
-[LinkedIn](https://www.linkedin.com/in/rohithsundarj/) · MS Computer Science, Kennesaw State University
+[LinkedIn](https://www.linkedin.com/in/rohithsundarj/) · [GitHub](https://github.com/sundar139) · MS Computer Science, Kennesaw State University
 
 ## License
 
