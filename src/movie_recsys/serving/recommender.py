@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 import polars as pl
@@ -14,8 +14,11 @@ from movie_recsys.ranking.features import _build_split_features
 from movie_recsys.serving.errors import (
     artifacts_not_ready,
     feature_mismatch,
+    invalid_candidate_top_k,
+    invalid_request,
     invalid_top_k,
     no_candidates,
+    user_id_not_found,
     user_not_found,
 )
 from movie_recsys.serving.registry import ArtifactRegistry, LoadedArtifacts
@@ -26,11 +29,30 @@ from movie_recsys.serving.scorer import PolicySpec, rank_with_policy
 class RecommendationRow:
     """Single recommendation score row."""
 
+    movie_id: int
     item_idx: int
-    score: float
-    residual_score: float
-    ranker_score: float
+    title: str
+    genres: str
+    release_year: int | None
+    final_score: float
+    residual_score: float | None
+    ranker_score: float | None
     popularity_score: float
+    rank_position: int
+    scorer_policy: str
+
+
+@dataclass(slots=True)
+class RecommendationResult:
+    """Top-level recommendation response object returned by the service."""
+
+    user_id: int | None
+    user_idx: int | None
+    k: int
+    cold_start: bool
+    scorer_policy: str
+    recommendations: list[RecommendationRow]
+    debug: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -42,6 +64,15 @@ class UserHistoryRow:
     title: str
     genres: str
     timestamp: int | None
+
+
+class ItemMetadata(TypedDict):
+    """Static metadata fields attached to recommendation items."""
+
+    movie_id: int
+    title: str
+    genres: str
+    release_year: int | None
 
 
 class RecommendationService:
@@ -83,7 +114,7 @@ class RecommendationService:
         artifacts = self._loaded_artifacts()
         user_idx = self.resolve_user_idx(user_id=user_id)
         if user_idx is None:
-            raise user_not_found(user_id)
+            raise user_id_not_found(user_id)
 
         interactions = artifacts.interactions_train_frame.filter(pl.col("userId") == user_id)
         if interactions.is_empty():
@@ -106,6 +137,23 @@ class RecommendationService:
             for row in joined.to_dicts()
         ]
         return user_idx, history_rows
+
+    def _item_metadata_map(self, *, item_indices: np.ndarray) -> dict[int, ItemMetadata]:
+        artifacts = self._loaded_artifacts()
+        metadata_frame = artifacts.items_frame.filter(
+            pl.col("item_idx").is_in(item_indices.tolist())
+        ).select(["item_idx", "original_movieId", "title", "genres", "release_year"])
+        return {
+            int(row["item_idx"]): {
+                "movie_id": int(row["original_movieId"]),
+                "title": str(row["title"] or ""),
+                "genres": str(row["genres"] or ""),
+                "release_year": (
+                    int(row["release_year"]) if row["release_year"] is not None else None
+                ),
+            }
+            for row in metadata_frame.to_dicts()
+        }
 
     def _loaded_artifacts(self) -> LoadedArtifacts:
         try:
@@ -226,25 +274,56 @@ class RecommendationService:
             raise no_candidates("No valid candidates available after filtering")
         return pl.DataFrame(rows)
 
-    def recommend(self, *, user_idx: int, top_k: int) -> list[RecommendationRow]:
-        """Generate top-k recommendations for a user index."""
-
+    def _cold_start_recommendations(
+        self,
+        *,
+        top_k: int,
+    ) -> list[RecommendationRow]:
         artifacts = self._loaded_artifacts()
+        popular_items = artifacts.items_frame.sort(
+            by=["popularity_score", "item_idx"],
+            descending=[True, False],
+        ).head(top_k)
 
-        configured_min = int(self._registry.config.runtime.min_top_k)
-        configured_max = int(self._registry.config.runtime.max_top_k)
-        min_allowed = max(configured_min, 1)
-        max_allowed = max(configured_max, min_allowed)
-        effective_top_k = max(min(top_k, max_allowed), min_allowed)
-        if top_k < min_allowed or top_k > max_allowed:
-            raise invalid_top_k(
-                top_k=top_k,
-                min_allowed=min_allowed,
-                max_allowed=max_allowed,
+        rows: list[RecommendationRow] = []
+        for rank_position, row in enumerate(popular_items.to_dicts(), start=1):
+            popularity_score = float(row.get("popularity_score") or 0.0)
+            release_year_raw = row.get("release_year")
+            rows.append(
+                RecommendationRow(
+                    movie_id=int(row.get("original_movieId") or 0),
+                    item_idx=int(row.get("item_idx") or 0),
+                    title=str(row.get("title") or ""),
+                    genres=str(row.get("genres") or ""),
+                    release_year=(
+                        int(release_year_raw) if release_year_raw is not None else None
+                    ),
+                    final_score=popularity_score,
+                    residual_score=None,
+                    ranker_score=None,
+                    popularity_score=popularity_score,
+                    rank_position=rank_position,
+                    scorer_policy="popularity_fallback",
+                )
             )
+        return rows
+
+    def _recommend_known_user(
+        self,
+        *,
+        user_idx: int,
+        user_id: int,
+        top_k: int,
+        candidate_top_k: int,
+        exclude_seen: bool,
+        include_debug: bool,
+    ) -> RecommendationResult:
+        artifacts = self._loaded_artifacts()
 
         if user_idx < 0 or user_idx >= artifacts.feature_tables.user_features.shape[0]:
             raise user_not_found(user_idx)
+
+        effective_top_k = top_k
 
         history_item_idx, timestamp_context = self._user_history(
             users_frame=artifacts.users_frame,
@@ -265,7 +344,7 @@ class RecommendationService:
         user_embedding = user_embedding_2d[0]
 
         candidate_pool_size = max(
-            int(self._registry.config.runtime.candidate_top_k),
+            int(candidate_top_k),
             effective_top_k,
         )
         retrieved_items, retrieved_scores, _latency_ms = search_index(
@@ -284,7 +363,9 @@ class RecommendationService:
             strict=False,
         ):
             item_index = int(item_idx)
-            if item_index in seen_candidate_items or item_index in seen_items:
+            if item_index in seen_candidate_items:
+                continue
+            if exclude_seen and item_index in seen_items:
                 continue
             seen_candidate_items.add(item_index)
             dedup_items.append(item_index)
@@ -358,17 +439,182 @@ class RecommendationService:
             policy=policy,
         )
 
+        metadata_map = self._item_metadata_map(item_indices=item_idx)
         final_rows: list[RecommendationRow] = []
-        for candidate_index in order[:effective_top_k].tolist():
+        for rank_position, candidate_index in enumerate(
+            order[:effective_top_k].tolist(),
+            start=1,
+        ):
             idx = int(candidate_index)
+            resolved_item_idx = int(item_idx[idx])
+            metadata = metadata_map.get(
+                resolved_item_idx,
+                {
+                    "movie_id": resolved_item_idx,
+                    "title": "",
+                    "genres": "",
+                    "release_year": None,
+                },
+            )
             final_rows.append(
                 RecommendationRow(
-                    item_idx=int(item_idx[idx]),
-                    score=float(display_scores[idx]),
+                    movie_id=int(metadata["movie_id"]),
+                    item_idx=resolved_item_idx,
+                    title=str(metadata["title"]),
+                    genres=str(metadata["genres"]),
+                    release_year=(
+                        int(metadata["release_year"])
+                        if metadata["release_year"] is not None
+                        else None
+                    ),
+                    final_score=float(display_scores[idx]),
                     residual_score=float(residual_scores[idx]),
                     ranker_score=float(ranker_scores[idx]),
                     popularity_score=float(popularity_scores[idx]),
+                    rank_position=rank_position,
+                    scorer_policy=policy.policy_name,
                 )
             )
 
-        return final_rows
+        debug_payload: dict[str, object] | None = None
+        if include_debug:
+            debug_payload = {
+                "requested_k": top_k,
+                "returned_k": len(final_rows),
+                "candidate_pool_size": candidate_pool_size,
+                "deduplicated_candidate_count": len(dedup_items),
+                "exclude_seen": exclude_seen,
+            }
+
+        return RecommendationResult(
+            user_id=user_id,
+            user_idx=user_idx,
+            k=top_k,
+            cold_start=False,
+            scorer_policy=policy.policy_name,
+            recommendations=final_rows,
+            debug=debug_payload,
+        )
+
+    def recommend(
+        self,
+        *,
+        user_idx: int | None,
+        user_id: int | None,
+        top_k: int,
+        exclude_seen: bool = True,
+        candidate_top_k: int | None = None,
+        allow_cold_start: bool = True,
+        include_debug: bool = False,
+    ) -> RecommendationResult:
+        """Generate top-k recommendations with optional cold-start fallback."""
+
+        configured_min = int(self._registry.config.runtime.min_top_k)
+        configured_max = int(self._registry.config.runtime.max_top_k)
+        min_allowed = max(configured_min, 1)
+        max_allowed = max(configured_max, min_allowed)
+        if top_k < min_allowed or top_k > max_allowed:
+            raise invalid_top_k(
+                top_k=top_k,
+                min_allowed=min_allowed,
+                max_allowed=max_allowed,
+            )
+
+        resolved_candidate_top_k = (
+            int(candidate_top_k)
+            if candidate_top_k is not None
+            else int(self._registry.config.runtime.candidate_top_k)
+        )
+        if resolved_candidate_top_k < top_k or resolved_candidate_top_k > 500:
+            raise invalid_candidate_top_k(
+                candidate_top_k=resolved_candidate_top_k,
+                requested_top_k=top_k,
+                max_allowed=500,
+            )
+
+        if user_idx is not None and user_id is not None:
+            raise invalid_request("Provide only one of user_idx or user_id")
+
+        if user_idx is None and user_id is None:
+            if allow_cold_start:
+                cold_start_rows = self._cold_start_recommendations(top_k=top_k)
+                return RecommendationResult(
+                    user_id=None,
+                    user_idx=None,
+                    k=top_k,
+                    cold_start=True,
+                    scorer_policy="popularity_fallback",
+                    recommendations=cold_start_rows,
+                    debug=(
+                        {
+                            "requested_k": top_k,
+                            "returned_k": len(cold_start_rows),
+                            "reason": "missing_user_identifier",
+                        }
+                        if include_debug
+                        else None
+                    ),
+                )
+            raise invalid_request(
+                "Either user_idx or user_id is required when allow_cold_start is false"
+            )
+
+        resolved_user_idx: int | None = user_idx
+        resolved_user_id: int | None = user_id
+        if user_idx is not None:
+            resolved_user_id = self.resolve_user_id(user_idx=user_idx)
+            if resolved_user_id is None:
+                if allow_cold_start:
+                    cold_start_rows = self._cold_start_recommendations(top_k=top_k)
+                    return RecommendationResult(
+                        user_id=None,
+                        user_idx=user_idx,
+                        k=top_k,
+                        cold_start=True,
+                        scorer_policy="popularity_fallback",
+                        recommendations=cold_start_rows,
+                        debug=(
+                            {
+                                "requested_k": top_k,
+                                "returned_k": len(cold_start_rows),
+                                "reason": "unknown_user_idx",
+                            }
+                            if include_debug
+                            else None
+                        ),
+                    )
+                raise user_not_found(user_idx)
+        elif user_id is not None:
+            resolved_user_idx = self.resolve_user_idx(user_id=user_id)
+            if resolved_user_idx is None:
+                if allow_cold_start:
+                    cold_start_rows = self._cold_start_recommendations(top_k=top_k)
+                    return RecommendationResult(
+                        user_id=user_id,
+                        user_idx=None,
+                        k=top_k,
+                        cold_start=True,
+                        scorer_policy="popularity_fallback",
+                        recommendations=cold_start_rows,
+                        debug=(
+                            {
+                                "requested_k": top_k,
+                                "returned_k": len(cold_start_rows),
+                                "reason": "unknown_user_id",
+                            }
+                            if include_debug
+                            else None
+                        ),
+                    )
+                raise user_id_not_found(user_id)
+
+        assert resolved_user_idx is not None
+        assert resolved_user_id is not None
+        return self._recommend_known_user(
+            user_idx=resolved_user_idx,
+            user_id=resolved_user_id,
+            top_k=top_k,
+            candidate_top_k=resolved_candidate_top_k,
+            exclude_seen=exclude_seen,
+            include_debug=include_debug,
+        )

@@ -71,25 +71,39 @@ def _build_recommend_response(
     request: RecommendRequest,
     service: RecommendationService,
 ) -> RecommendResponse:
-    rows = service.recommend(user_idx=request.user_idx, top_k=request.top_k)
+    result = service.recommend(
+        user_idx=request.user_idx,
+        user_id=request.user_id,
+        top_k=request.top_k,
+        exclude_seen=request.exclude_seen,
+        candidate_top_k=request.candidate_top_k,
+        allow_cold_start=request.allow_cold_start,
+        include_debug=request.include_debug,
+    )
     items = [
         RecommendationItem(
-            rank=index,
+            movie_id=row.movie_id,
             item_idx=row.item_idx,
-            score=row.score,
+            title=row.title,
+            genres=row.genres,
+            release_year=row.release_year,
+            final_score=row.final_score,
             residual_score=row.residual_score,
             ranker_score=row.ranker_score,
             popularity_score=row.popularity_score,
+            rank_position=row.rank_position,
+            scorer_policy=row.scorer_policy,
         )
-        for index, row in enumerate(rows, start=1)
+        for row in result.recommendations
     ]
     return RecommendResponse(
-        user_idx=request.user_idx,
-        requested_top_k=request.top_k,
-        returned_top_k=len(items),
-        policy_name=service.policy_name,
-        total_candidates=len(rows),
+        user_id=result.user_id,
+        user_idx=result.user_idx,
+        k=result.k,
+        cold_start=result.cold_start,
+        scorer_policy=result.scorer_policy,
         recommendations=items,
+        debug=result.debug,
     )
 
 
@@ -182,12 +196,20 @@ def create_app() -> FastAPI:
     @app.post(
         "/recommendations",
         response_model=RecommendResponse,
-        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        responses={
+            400: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
     )
     @app.post(
         "/v1/recommend",
         response_model=RecommendResponse,
-        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        responses={
+            400: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
     )
     def recommend(
         request: RecommendRequest,
@@ -203,19 +225,18 @@ def create_app() -> FastAPI:
     def recommend_by_user_id(
         user_id: int,
         k: int = Query(default=10, ge=1, le=200),
+        allow_cold_start: bool = Query(default=True),
+        exclude_seen: bool = Query(default=True),
+        include_debug: bool = Query(default=False),
         service: RecommendationService = Depends(get_recommendation_service),
     ) -> RecommendResponse:
-        user_idx = service.resolve_user_idx(user_id=user_id)
-        if user_idx is None:
-            raise to_http_exception(
-                ServingError(
-                    code="user_not_found",
-                    message=f"Unknown user_id: {user_id}",
-                    status_code=404,
-                )
-            )
-
-        request = RecommendRequest(user_idx=user_idx, top_k=k)
+        request = RecommendRequest(
+            user_id=user_id,
+            top_k=k,
+            allow_cold_start=allow_cold_start,
+            exclude_seen=exclude_seen,
+            include_debug=include_debug,
+        )
         return _build_recommend_response(request=request, service=service)
 
     @app.get(

@@ -40,6 +40,39 @@ def user_not_found(user_idx: int) -> ServingError:
     )
 
 
+def user_id_not_found(user_id: int) -> ServingError:
+    return ServingError(
+        message=f"Unknown user_id: {user_id}",
+        code="user_not_found",
+        status_code=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def invalid_request(message: str) -> ServingError:
+    return ServingError(
+        message=message,
+        code="invalid_request",
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def invalid_candidate_top_k(
+    *,
+    candidate_top_k: int,
+    requested_top_k: int,
+    max_allowed: int,
+) -> ServingError:
+    return ServingError(
+        message=(
+            "candidate_top_k must be >= requested k and <= "
+            f"{max_allowed}, received candidate_top_k={candidate_top_k}, "
+            f"requested_k={requested_top_k}"
+        ),
+        code="invalid_candidate_top_k",
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+    )
+
+
 def invalid_top_k(*, top_k: int, min_allowed: int, max_allowed: int) -> ServingError:
     return ServingError(
         message=(

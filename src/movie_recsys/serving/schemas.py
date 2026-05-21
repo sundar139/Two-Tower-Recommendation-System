@@ -8,19 +8,35 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 class RecommendationItem(BaseModel):
     """Single recommendation output row."""
 
-    rank: int = Field(ge=1)
+    movie_id: int = Field(
+        ge=1,
+        serialization_alias="movieId",
+        validation_alias=AliasChoices("movie_id", "movieId"),
+    )
     item_idx: int = Field(ge=0)
-    score: float
-    residual_score: float
-    ranker_score: float
+    title: str
+    genres: str
+    release_year: int | None = None
+    final_score: float
+    residual_score: float | None = None
+    ranker_score: float | None = None
     popularity_score: float
+    rank_position: int = Field(ge=1)
+    scorer_policy: str
 
 
 class RecommendRequest(BaseModel):
     """Recommendation request payload."""
 
-    user_idx: int = Field(ge=0)
-    top_k: int = Field(default=20, ge=1, le=200)
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int | None = Field(default=None, ge=1)
+    user_idx: int | None = Field(default=None, ge=0)
+    top_k: int = Field(default=10, ge=1)
+    exclude_seen: bool = True
+    include_debug: bool = False
+    allow_cold_start: bool = True
+    candidate_top_k: int | None = Field(default=None, ge=1)
 
 
 class RecommendResponse(BaseModel):
@@ -28,12 +44,13 @@ class RecommendResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_idx: int
-    requested_top_k: int
-    returned_top_k: int
-    policy_name: str
-    total_candidates: int
+    user_id: int | None = None
+    user_idx: int | None = None
+    k: int
+    cold_start: bool
+    scorer_policy: str
     recommendations: list[RecommendationItem]
+    debug: dict[str, object] | None = None
 
 
 class ReadinessResponse(BaseModel):
