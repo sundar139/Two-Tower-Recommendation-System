@@ -234,6 +234,33 @@ uv run python scripts/benchmark_serving_api.py --base-url http://127.0.0.1:8000 
 Serving workflow details:
 
 - `docs/serving_api.md`
+- `docs/docker_local.md`
+
+## Step 7A Docker Local Packaging Commands
+
+Artifact preflight:
+
+```powershell
+uv run python scripts/check_docker_artifacts.py --config configs/serving.yaml
+```
+
+Build image:
+
+```powershell
+docker compose build
+```
+
+Run API in Docker:
+
+```powershell
+docker compose up recommender-api
+```
+
+Run Docker smoke test (second terminal):
+
+```powershell
+uv run python scripts/docker_smoke_test.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
+```
 
 ## Full Residual Validation Commands
 
@@ -452,6 +479,6 @@ Transformer limitations currently in scope:
 
 - CL retraining remains experimental and is not part of serving
 - no Ollama explanation endpoints yet
-- no Docker packaging yet
+- local Docker packaging only (no cloud targets)
 - no cloud deployment yet
 - no authentication

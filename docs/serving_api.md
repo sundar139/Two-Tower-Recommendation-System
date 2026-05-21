@@ -137,10 +137,33 @@ Outputs:
 - `success_count`, `failure_count`
 - JSON report at `artifacts/reports/serving_api_latency.json`
 
+## Step 7A Docker Local Packaging
+
+Step 7A packages this API for reproducible local Docker runs without changing retrieval or scorer behavior.
+
+Why artifacts are mounted instead of baked into the image:
+
+- model checkpoints and FAISS bundles are large and updated independently of application code
+- mounting keeps the image generic and reproducible while using approved local artifacts
+- local validation can fail fast when required files are missing
+
+Local Docker sequence:
+
+```powershell
+uv run python scripts/check_docker_artifacts.py --config configs/serving.yaml
+docker compose build
+docker compose up recommender-api
+uv run python scripts/docker_smoke_test.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
+```
+
+Detailed Docker runbook:
+
+- `docs/docker_local.md`
+
 ## Known Limitations
 
 - no Ollama explanations yet
-- no Docker packaging yet
+- local Docker only
 - no cloud deployment yet
 - no authentication
 - local model/data artifacts are required
