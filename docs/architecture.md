@@ -101,3 +101,7 @@ Explanations are post-processing metadata only:
 - Explanation generation can be requested per call.
 - If Ollama is unavailable and fail-open is enabled, recommendations are still returned with `explanation_status=unavailable`.
 - Explanations do not mutate scores or reorder the ranked list.
+
+## Mermaid Validation Note
+
+The Mermaid blocks in this document use standard GitHub Markdown-supported syntax (`flowchart`, `sequenceDiagram`) and are intended to render directly in repository viewers that support Mermaid.
