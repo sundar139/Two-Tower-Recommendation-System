@@ -1,8 +1,10 @@
-# Step 7A Docker Local Workflow
+# Step 7A/7B Docker Local Workflow
 
 ## 1. Scope
 
 Step 7A packages the approved local FastAPI recommendation service into a reproducible Docker workflow.
+
+Step 7B keeps the same container contract and adds optional Ollama-backed explanations.
 
 In scope:
 
@@ -10,12 +12,12 @@ In scope:
 - local Docker Compose service for the existing Step 6B contract
 - mounted local artifacts and processed data
 - local smoke validation against running container
+- optional explanation flow when Ollama is reachable from the container
 
 Out of scope:
 
 - cloud deployment
 - authentication
-- Ollama explanations
 
 ## 2. Why Artifacts Are Mounted (Not Baked)
 
@@ -94,7 +96,26 @@ Outputs:
 - artifacts/reports/docker_smoke_test.json
 - final ok true/false
 
-## 8. Troubleshooting
+## 8. Optional Ollama Explanations in Docker
+
+`configs/serving.yaml` defaults `explanations.base_url` to `http://127.0.0.1:11434`.
+Inside Docker, that loopback points to the API container itself.
+
+The Step 7A/7B API image does not bundle or launch an Ollama service.
+
+To use host Ollama from the container:
+
+- run Ollama on the host (`ollama serve`) and pull required models
+- set `OLLAMA_BASE_URL=http://host.docker.internal:11434`
+- keep `explanations.fail_open=true` so recommendation responses continue if Ollama is temporarily unavailable
+
+Validate explanation behavior after the API container is running:
+
+```powershell
+uv run python scripts/validate_ollama_explanations.py --base-url http://127.0.0.1:8000 --ollama-url http://127.0.0.1:11434 --known-user-idx 0 --k 10 --allow-fail-open
+```
+
+## 9. Troubleshooting
 
 Missing artifacts:
 
@@ -112,9 +133,15 @@ Port already in use:
 
 - stop conflicting process or update compose port mapping and smoke-test base URL consistently.
 
-## 9. Known Limitations
+Explanation status remains `unavailable` in Docker:
+
+- verify the container can reach `host.docker.internal:11434`
+- verify `GET /api/tags` from host Ollama includes the configured chat model
+- rerun `scripts/validate_ollama_explanations.py` and inspect failing checks
+
+## 10. Known Limitations
 
 - local Docker only
 - no cloud deployment yet
 - no auth
-- no Ollama explanations yet
+- Ollama explanations in Docker require host reachability configuration
