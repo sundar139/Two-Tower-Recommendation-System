@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from movie_recsys.serving.app import create_app
 from movie_recsys.serving.dependencies import get_recommendation_service
 from movie_recsys.serving.errors import user_id_not_found
+from movie_recsys.serving.ollama_client import OllamaClient, OllamaClientConfig
 from movie_recsys.serving.recommender import RecommendationResult, RecommendationRow, UserHistoryRow
 from movie_recsys.serving.registry import ArtifactRegistry
 
@@ -70,6 +72,21 @@ class StubService:
         self.last_history_limit = limit
         return (self.response.user_idx or 0), self.history[:limit]
 
+    def resolve_user_id(self, *, user_idx: int) -> int | None:
+        if self.response.user_idx == user_idx:
+            return self.response.user_id
+        return None
+
+    def get_user_genre_affinity(
+        self,
+        *,
+        user_id: int | None,
+        user_idx: int | None,
+        top_n: int = 5,
+    ) -> list[str]:
+        _ = user_id, user_idx
+        return ["Drama", "Crime"][:top_n]
+
 
 def _sample_result(*, user_id: int = 709, user_idx: int = 0, k: int = 2) -> RecommendationResult:
     rows = [
@@ -109,6 +126,24 @@ def _sample_result(*, user_id: int = 709, user_idx: int = 0, k: int = 2) -> Reco
         recommendations=rows[:k],
         debug=None,
     )
+
+
+def _make_mock_ollama_client(
+    handler: httpx.BaseTransport,
+) -> OllamaClient:
+    config = OllamaClientConfig(
+        base_url="http://127.0.0.1:11434",
+        chat_model="qwen3:4b",
+        embedding_model="qwen3-embedding:0.6b",
+        timeout_seconds=2.0,
+        temperature=0.2,
+    )
+    http_client = httpx.Client(
+        base_url=config.base_url,
+        timeout=config.timeout_seconds,
+        transport=handler,
+    )
+    return OllamaClient(config=config, http_client=http_client)
 
 
 def test_health_aliases_work(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,6 +191,10 @@ def test_metadata_includes_selected_policy(monkeypatch: pytest.MonkeyPatch) -> N
         assert response.status_code == 200
         payload = response.json()
         assert payload["production_policy"] == "ranker_topk_popularity_backfill"
+        assert payload["explanations_enabled"] is True
+        assert payload["explanation_provider"] == "ollama"
+        assert payload["chat_model"]
+        assert payload["fail_open"] is True
 
 
 def test_recommendations_and_v1_have_same_schema(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,3 +340,243 @@ def test_deterministic_repeated_requests(monkeypatch: pytest.MonkeyPatch) -> Non
         assert first.status_code == 200
         assert second.status_code == 200
         assert first.json() == second.json()
+
+
+def test_include_explanations_false_does_not_call_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    calls: dict[str, int] = {"generate": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            calls["generate"] += 1
+            return httpx.Response(status_code=200, json={"response": "unused"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(httpx.MockTransport(handler))
+        response = client.post(
+            "/recommendations",
+            json={"user_id": 709, "k": 2, "include_explanations": False},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["explanation_status"] == "disabled"
+        assert all(row["explanation"] is None for row in payload["recommendations"])
+        assert calls["generate"] == 0
+
+
+def test_recommendations_include_explanations_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    calls: dict[str, int] = {"generate": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            calls["generate"] += 1
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "response": (
+                        '{"overall_summary": "Top picks align with your recent genre mix.",' 
+                        '"item_explanations": ['
+                        '{"rank_position": 1, "movie_id": 318, '
+                        '"explanation": "Strong genre alignment with your recent history."},'
+                        '{"rank_position": 2, "movie_id": 296, '
+                        '"explanation": "High combined ranker and popularity support."}'
+                        "]}"
+                    )
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(httpx.MockTransport(handler))
+        response = client.post(
+            "/recommendations",
+            json={
+                "user_id": 709,
+                "k": 2,
+                "include_explanations": True,
+                "explanation_style": "concise",
+                "max_explanation_items": 1,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["explanation_status"] == "generated"
+        assert isinstance(payload["overall_explanation"], str)
+        assert payload["recommendations"][0]["explanation"]
+        assert payload["recommendations"][1]["explanation"] is None
+        assert calls["generate"] == 1
+
+
+def test_recommendations_fail_open_when_ollama_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    def unavailable_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(
+            httpx.MockTransport(unavailable_handler)
+        )
+        baseline = client.post(
+            "/recommendations",
+            json={"user_id": 709, "k": 2, "include_explanations": False},
+        )
+        explained = client.post(
+            "/recommendations",
+            json={"user_id": 709, "k": 2, "include_explanations": True},
+        )
+        assert baseline.status_code == 200
+        assert explained.status_code == 200
+
+        baseline_ids = [row["movieId"] for row in baseline.json()["recommendations"]]
+        explained_ids = [row["movieId"] for row in explained.json()["recommendations"]]
+        assert baseline_ids == explained_ids
+        assert explained.json()["explanation_status"] == "unavailable"
+
+
+def test_explanations_do_not_reorder_recommendations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "response": (
+                        '{"overall_summary": "Stable ranking retained.",' 
+                        '"item_explanations": ['
+                        '{"rank_position": 1, "movie_id": 318, "explanation": "Rank one."},'
+                        '{"rank_position": 2, "movie_id": 296, "explanation": "Rank two."}'
+                        "]}"
+                    )
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(httpx.MockTransport(handler))
+        baseline = client.post(
+            "/recommendations",
+            json={"user_id": 709, "k": 2, "include_explanations": False},
+        )
+        explained = client.post(
+            "/recommendations",
+            json={"user_id": 709, "k": 2, "include_explanations": True},
+        )
+        assert baseline.status_code == 200
+        assert explained.status_code == 200
+
+        baseline_rows = baseline.json()["recommendations"]
+        explained_rows = explained.json()["recommendations"]
+        assert [row["movieId"] for row in baseline_rows] == [
+            row["movieId"] for row in explained_rows
+        ]
+        assert [row["rank_position"] for row in baseline_rows] == [
+            row["rank_position"] for row in explained_rows
+        ]
+
+
+def test_v1_explain_endpoint_generates_explanations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "response": (
+                        '{"overall_summary": "Explanation endpoint response.",' 
+                        '"item_explanations": ['
+                        '{"rank_position": 1, "movie_id": 318, "explanation": "Item one."},'
+                        '{"rank_position": 2, "movie_id": 296, "explanation": "Item two."}'
+                        "]}"
+                    )
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(httpx.MockTransport(handler))
+        response = client.post(
+            "/v1/explain",
+            json={
+                "user_id": 709,
+                "top_k": 2,
+                "style": "concise",
+                "max_explanation_items": 2,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["explanation_status"] == "generated"
+        assert payload["overall_explanation"]
+        assert len(payload["recommendations"]) == 2
+
+
+def test_explanations_recommendations_alias_matches_v1_explain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ArtifactRegistry, "load", lambda self: None)
+    app = create_app()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "response": (
+                        '{"overall_summary": "Alias endpoint parity.",' 
+                        '"item_explanations": ['
+                        '{"rank_position": 1, "movie_id": 318, "explanation": "Item one."},'
+                        '{"rank_position": 2, "movie_id": 296, "explanation": "Item two."}'
+                        "]}"
+                    )
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    stub_service = StubService(response=_sample_result(), history=[])
+    app.dependency_overrides[get_recommendation_service] = lambda: stub_service
+
+    payload = {
+        "user_id": 709,
+        "top_k": 2,
+        "style": "concise",
+        "max_explanation_items": 2,
+    }
+    with TestClient(app) as client:
+        client.app.state.ollama_client = _make_mock_ollama_client(httpx.MockTransport(handler))
+        v1 = client.post("/v1/explain", json=payload)
+        alias = client.post("/explanations/recommendations", json=payload)
+        assert v1.status_code == 200
+        assert alias.status_code == 200
+        assert set(v1.json().keys()) == set(alias.json().keys())
