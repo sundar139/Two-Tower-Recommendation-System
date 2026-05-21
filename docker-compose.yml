@@ -1,0 +1,14 @@
+services:
+  recommender-api:
+    build: .
+    container_name: movielens-recommender-api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=local-docker
+      - SERVING_CONFIG=configs/serving.yaml
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+      - ./data/processed:/app/data/processed:ro
+      - ./configs:/app/configs:ro
+    command: uv run python scripts/run_api.py --host 0.0.0.0 --port 8000
