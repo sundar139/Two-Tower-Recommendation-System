@@ -30,13 +30,38 @@ class RecommendRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_id: int | None = Field(default=None, ge=1)
-    user_idx: int | None = Field(default=None, ge=0)
-    top_k: int = Field(default=10, ge=1)
-    exclude_seen: bool = True
-    include_debug: bool = False
-    allow_cold_start: bool = True
-    candidate_top_k: int | None = Field(default=None, ge=1)
+    user_id: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    user_idx: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("user_idx", "userIdx"),
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        validation_alias=AliasChoices("top_k", "k"),
+    )
+    exclude_seen: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("exclude_seen", "excludeSeen"),
+    )
+    include_debug: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("include_debug", "includeDebug"),
+    )
+    allow_cold_start: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("allow_cold_start", "allowColdStart"),
+    )
+    candidate_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("candidate_top_k", "candidateTopK"),
+    )
 
 
 class RecommendResponse(BaseModel):
