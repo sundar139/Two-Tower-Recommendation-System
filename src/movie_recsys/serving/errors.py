@@ -100,6 +100,14 @@ def feature_mismatch(missing_columns: list[str]) -> ServingError:
     )
 
 
+def explanation_unavailable(message: str) -> ServingError:
+    return ServingError(
+        message=message,
+        code="explanation_unavailable",
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 def to_http_exception(error: ServingError) -> HTTPException:
     """Convert a domain error into a structured HTTP exception."""
 

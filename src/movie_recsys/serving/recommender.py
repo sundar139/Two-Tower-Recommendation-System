@@ -138,6 +138,43 @@ class RecommendationService:
         ]
         return user_idx, history_rows
 
+    def get_user_genre_affinity(
+        self,
+        *,
+        user_id: int | None = None,
+        user_idx: int | None = None,
+        top_n: int = 5,
+    ) -> list[str]:
+        """Return strongest user genre affinity labels for explanation context."""
+
+        artifacts = self._loaded_artifacts()
+        resolved_user_idx = user_idx
+        if resolved_user_idx is None and user_id is not None:
+            resolved_user_idx = self.resolve_user_idx(user_id=user_id)
+        if resolved_user_idx is None:
+            return []
+
+        row = artifacts.users_frame.filter(pl.col("user_idx") == resolved_user_idx)
+        if row.height != 1:
+            return []
+
+        payload = row.to_dicts()[0]
+        affinity_scores: list[tuple[str, float]] = []
+        for key, value in payload.items():
+            if not key.startswith("genre_affinity_") or value is None:
+                continue
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                continue
+            if score <= 0.0:
+                continue
+            genre = key.removeprefix("genre_affinity_").replace("_", " ")
+            affinity_scores.append((genre, score))
+
+        affinity_scores.sort(key=lambda item: item[1], reverse=True)
+        return [name for name, _score in affinity_scores[:max(top_n, 0)]]
+
     def _item_metadata_map(self, *, item_indices: np.ndarray) -> dict[int, ItemMetadata]:
         artifacts = self._loaded_artifacts()
         metadata_frame = artifacts.items_frame.filter(
