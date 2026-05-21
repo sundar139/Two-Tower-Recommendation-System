@@ -5,7 +5,6 @@ from pathlib import Path
 
 import httpx
 import yaml
-
 from scripts import run_api
 from scripts.check_docker_artifacts import build_preflight_report, print_preflight_report
 from scripts.docker_smoke_test import _result, parse_response_payload
