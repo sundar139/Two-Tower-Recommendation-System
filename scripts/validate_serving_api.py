@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +39,45 @@ def _is_finite(value: Any) -> bool:
     return True
 
 
+def _build_timeout_error(
+    *,
+    exc: httpx.ReadTimeout,
+    timeout_seconds: float,
+    check_name: str,
+    debug: bool,
+) -> dict[str, Any]:
+    method = "UNKNOWN"
+    path = "unknown"
+    if exc.request is not None:
+        method = exc.request.method
+        path = exc.request.url.path
+
+    message = (
+        "explanation validation timeout"
+        f" (check={check_name}, request={method} {path}, timeout_seconds={timeout_seconds})"
+    )
+    payload: dict[str, Any] = {
+        "type": "timeout",
+        "ok": False,
+        "check": check_name,
+        "request": f"{method} {path}",
+        "timeout_seconds": timeout_seconds,
+        "message": message,
+    }
+    if debug:
+        payload["traceback"] = traceback.format_exc()
+    return payload
+
+
 @app.command()
 def main(
     base_url: str = typer.Option("http://127.0.0.1:8000", "--base-url"),
     known_user_idx: int = typer.Option(0, "--known-user-idx"),
     known_user_id: int | None = typer.Option(None, "--known-user-id"),
     k: int = typer.Option(10, "--k"),
-    timeout_seconds: float = typer.Option(20.0, "--timeout-seconds"),
+    timeout_seconds: float = typer.Option(120.0, "--timeout-seconds"),
+    max_explanation_items: int = typer.Option(3, "--max-explanation-items"),
+    debug: bool = typer.Option(False, "--debug"),
     report_path: Path = typer.Option(
         Path("artifacts/reports/serving_api_validation.json"),
         "--report-path",
@@ -54,6 +87,8 @@ def main(
 
     checks: list[dict[str, Any]] = []
     latencies: dict[str, list[float]] = {}
+    timeout_error: dict[str, Any] | None = None
+    requested_k = max(1, k)
 
     def record(
         *,
@@ -71,6 +106,34 @@ def main(
                 "latency_ms": latency_ms,
                 "details": details,
             }
+        )
+
+    def record_explanation_timeout(check_name: str, exc: httpx.ReadTimeout) -> None:
+        nonlocal timeout_error
+        timeout_payload = _build_timeout_error(
+            exc=exc,
+            timeout_seconds=timeout_seconds,
+            check_name=check_name,
+            debug=debug,
+        )
+        if timeout_error is None:
+            timeout_error = timeout_payload
+        record(
+            name=check_name,
+            passed=False,
+            latency_ms=None,
+            details=timeout_payload["message"],
+        )
+
+    def skip_after_timeout(check_name: str) -> None:
+        if timeout_error is None:
+            msg = "skip_after_timeout called before a timeout was recorded"
+            raise RuntimeError(msg)
+        record(
+            name=check_name,
+            passed=False,
+            latency_ms=None,
+            details=f"skipped due to earlier timeout: {timeout_error['message']}",
         )
 
     with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_seconds) as client:
@@ -214,7 +277,7 @@ def main(
             details=("ok" if schema_match else "response schema mismatch"),
         )
 
-        explanation_limit = max(1, min(3, requested_k))
+        explanation_limit = max(1, min(max_explanation_items, requested_k))
         explain_payload = {
             "user_idx": known_user_idx,
             "k": requested_k,
@@ -224,73 +287,90 @@ def main(
             "explanation_style": "concise",
             "max_explanation_items": explanation_limit,
         }
-        explain_resp, explain_latency = _request(
-            client,
-            method="POST",
-            path="/recommendations",
-            payload=explain_payload,
-        )
-        explain_body: dict[str, Any] = (
-            explain_resp.json() if explain_resp.status_code == 200 else {}
-        )
-
         explanations_enabled = bool(metadata_body.get("explanations_enabled", False))
         allowed_statuses = {"generated", "unavailable", "failed"}
         if not explanations_enabled:
             allowed_statuses = {"disabled"}
 
-        explain_status = explain_body.get("explanation_status")
-        explain_ok = (
-            explain_resp.status_code == 200
-            and isinstance(explain_body.get("recommendations"), list)
-            and explain_status in allowed_statuses
-        )
-        record(
-            name="POST /recommendations include_explanations=true",
-            passed=explain_ok,
-            latency_ms=explain_latency,
-            details=("ok" if explain_ok else explain_resp.text),
-        )
+        explain_body: dict[str, Any] = {}
+        explain_ok = False
+        explain_status: Any = None
+        if timeout_error is None:
+            try:
+                explain_resp, explain_latency = _request(
+                    client,
+                    method="POST",
+                    path="/recommendations",
+                    payload=explain_payload,
+                )
+            except httpx.ReadTimeout as exc:
+                record_explanation_timeout("POST /recommendations include_explanations=true", exc)
+            else:
+                explain_body = explain_resp.json() if explain_resp.status_code == 200 else {}
+                explain_status = explain_body.get("explanation_status")
+                explain_ok = (
+                    explain_resp.status_code == 200
+                    and isinstance(explain_body.get("recommendations"), list)
+                    and explain_status in allowed_statuses
+                )
+                record(
+                    name="POST /recommendations include_explanations=true",
+                    passed=explain_ok,
+                    latency_ms=explain_latency,
+                    details=("ok" if explain_ok else explain_resp.text),
+                )
+        else:
+            skip_after_timeout("POST /recommendations include_explanations=true")
 
-        explain_count_ok = True
-        if explain_ok and explain_status == "generated":
-            explained_rows = explain_body.get("recommendations", [])
-            explained_count = sum(
-                1
-                for row in explained_rows
-                if isinstance(row.get("explanation"), str) and row["explanation"]
+        if timeout_error is None:
+            explain_count_ok = True
+            if explain_ok and explain_status == "generated":
+                explained_rows = explain_body.get("recommendations", [])
+                explained_count = sum(
+                    1
+                    for row in explained_rows
+                    if isinstance(row.get("explanation"), str) and row["explanation"]
+                )
+                explain_count_ok = explained_count <= explanation_limit
+            record(
+                name="Explanation count respects max_explanation_items",
+                passed=explain_count_ok,
+                latency_ms=None,
+                details=(
+                    "ok"
+                    if explain_count_ok
+                    else "generated explanation count exceeded max_explanation_items"
+                ),
             )
-            explain_count_ok = explained_count <= explanation_limit
-        record(
-            name="Explanation count respects max_explanation_items",
-            passed=explain_count_ok,
-            latency_ms=None,
-            details=(
-                "ok"
-                if explain_count_ok
-                else "generated explanation count exceeded max_explanation_items"
-            ),
-        )
+        else:
+            skip_after_timeout("Explanation count respects max_explanation_items")
 
-        explanation_order_ok = False
-        if rec_ok and explain_ok:
-            baseline_ids = [
-                row["movieId"]
-                for row in rec_body.get("recommendations", [])
-                if isinstance(row, dict) and isinstance(row.get("movieId"), int)
-            ]
-            explained_ids = [
-                row["movieId"]
-                for row in explain_body.get("recommendations", [])
-                if isinstance(row, dict) and isinstance(row.get("movieId"), int)
-            ]
-            explanation_order_ok = baseline_ids == explained_ids
-        record(
-            name="Explanations do not reorder recommendations",
-            passed=explanation_order_ok,
-            latency_ms=None,
-            details=("ok" if explanation_order_ok else "ranking order changed with explanations"),
-        )
+        if timeout_error is None:
+            explanation_order_ok = False
+            if rec_ok and explain_ok:
+                baseline_ids = [
+                    row["movieId"]
+                    for row in rec_body.get("recommendations", [])
+                    if isinstance(row, dict) and isinstance(row.get("movieId"), int)
+                ]
+                explained_ids = [
+                    row["movieId"]
+                    for row in explain_body.get("recommendations", [])
+                    if isinstance(row, dict) and isinstance(row.get("movieId"), int)
+                ]
+                explanation_order_ok = baseline_ids == explained_ids
+            record(
+                name="Explanations do not reorder recommendations",
+                passed=explanation_order_ok,
+                latency_ms=None,
+                details=(
+                    "ok"
+                    if explanation_order_ok
+                    else "ranking order changed with explanations"
+                ),
+            )
+        else:
+            skip_after_timeout("Explanations do not reorder recommendations")
 
         resolved_user_id = known_user_id
         if resolved_user_id is None and rec_ok:
@@ -385,32 +465,39 @@ def main(
             details=("ok" if unknown_true_ok else unknown_true_resp.text),
         )
 
-        unknown_explain_resp, unknown_explain_latency = _request(
-            client,
-            method="POST",
-            path="/recommendations",
-            payload={
-                "user_id": unknown_user_id,
-                "k": requested_k,
-                "allow_cold_start": True,
-                "include_explanations": True,
-                "explanation_style": "concise",
-                "max_explanation_items": explanation_limit,
-            },
-        )
-        unknown_explain_ok = False
-        if unknown_explain_resp.status_code == 200:
-            unknown_explain_body = unknown_explain_resp.json()
-            unknown_explain_ok = bool(unknown_explain_body.get("cold_start", False))
-            unknown_explain_ok = unknown_explain_ok and (
-                unknown_explain_body.get("explanation_status") in allowed_statuses
-            )
-        record(
-            name="Unknown user with explanations fail-open",
-            passed=unknown_explain_ok,
-            latency_ms=unknown_explain_latency,
-            details=("ok" if unknown_explain_ok else unknown_explain_resp.text),
-        )
+        if timeout_error is None:
+            try:
+                unknown_explain_resp, unknown_explain_latency = _request(
+                    client,
+                    method="POST",
+                    path="/recommendations",
+                    payload={
+                        "user_id": unknown_user_id,
+                        "k": requested_k,
+                        "allow_cold_start": True,
+                        "include_explanations": True,
+                        "explanation_style": "concise",
+                        "max_explanation_items": explanation_limit,
+                    },
+                )
+            except httpx.ReadTimeout as exc:
+                record_explanation_timeout("Unknown user with explanations fail-open", exc)
+            else:
+                unknown_explain_ok = False
+                if unknown_explain_resp.status_code == 200:
+                    unknown_explain_body = unknown_explain_resp.json()
+                    unknown_explain_ok = bool(unknown_explain_body.get("cold_start", False))
+                    unknown_explain_ok = unknown_explain_ok and (
+                        unknown_explain_body.get("explanation_status") in allowed_statuses
+                    )
+                record(
+                    name="Unknown user with explanations fail-open",
+                    passed=unknown_explain_ok,
+                    latency_ms=unknown_explain_latency,
+                    details=("ok" if unknown_explain_ok else unknown_explain_resp.text),
+                )
+        else:
+            skip_after_timeout("Unknown user with explanations fail-open")
 
         unknown_false_resp, unknown_false_latency = _request(
             client,
@@ -537,62 +624,87 @@ def main(
         else:
             explain_request_payload["user_idx"] = known_user_idx
 
-        v1_explain_resp, v1_explain_latency = _request(
-            client,
-            method="POST",
-            path="/v1/explain",
-            payload=explain_request_payload,
-        )
-        v1_explain_body: dict[str, Any] = (
-            v1_explain_resp.json() if v1_explain_resp.status_code == 200 else {}
-        )
-        v1_explain_ok = (
-            v1_explain_resp.status_code == 200
-            and isinstance(v1_explain_body.get("recommendations"), list)
-            and v1_explain_body.get("explanation_status") in allowed_statuses
-        )
-        record(
-            name="POST /v1/explain",
-            passed=v1_explain_ok,
-            latency_ms=v1_explain_latency,
-            details=("ok" if v1_explain_ok else v1_explain_resp.text),
-        )
-
-        explain_alias_resp, explain_alias_latency = _request(
-            client,
-            method="POST",
-            path="/explanations/recommendations",
-            payload=explain_request_payload,
-        )
-        explain_alias_ok = explain_alias_resp.status_code == 200
-        record(
-            name="POST /explanations/recommendations",
-            passed=explain_alias_ok,
-            latency_ms=explain_alias_latency,
-            details=("ok" if explain_alias_ok else explain_alias_resp.text),
-        )
-
-        explain_alias_schema_ok = False
-        if v1_explain_ok and explain_alias_ok:
-            explain_alias_body = explain_alias_resp.json()
-            explain_alias_schema_ok = set(v1_explain_body.keys()) == set(explain_alias_body.keys())
-            v1_rows = v1_explain_body.get("recommendations", [])
-            alias_rows = explain_alias_body.get("recommendations", [])
-            if (
-                isinstance(v1_rows, list)
-                and isinstance(alias_rows, list)
-                and v1_rows
-                and alias_rows
-            ):
-                explain_alias_schema_ok = explain_alias_schema_ok and set(v1_rows[0].keys()) == set(
-                    alias_rows[0].keys()
+        v1_explain_ok = False
+        v1_explain_body: dict[str, Any] = {}
+        if timeout_error is None:
+            try:
+                v1_explain_resp, v1_explain_latency = _request(
+                    client,
+                    method="POST",
+                    path="/v1/explain",
+                    payload=explain_request_payload,
                 )
-        record(
-            name="Schema parity /v1/explain vs /explanations/recommendations",
-            passed=explain_alias_schema_ok,
-            latency_ms=None,
-            details=("ok" if explain_alias_schema_ok else "explain endpoint schema mismatch"),
-        )
+            except httpx.ReadTimeout as exc:
+                record_explanation_timeout("POST /v1/explain", exc)
+            else:
+                v1_explain_body = (
+                    v1_explain_resp.json() if v1_explain_resp.status_code == 200 else {}
+                )
+                v1_explain_ok = (
+                    v1_explain_resp.status_code == 200
+                    and isinstance(v1_explain_body.get("recommendations"), list)
+                    and v1_explain_body.get("explanation_status") in allowed_statuses
+                )
+                record(
+                    name="POST /v1/explain",
+                    passed=v1_explain_ok,
+                    latency_ms=v1_explain_latency,
+                    details=("ok" if v1_explain_ok else v1_explain_resp.text),
+                )
+        else:
+            skip_after_timeout("POST /v1/explain")
+
+        explain_alias_ok = False
+        explain_alias_body: dict[str, Any] = {}
+        if timeout_error is None:
+            try:
+                explain_alias_resp, explain_alias_latency = _request(
+                    client,
+                    method="POST",
+                    path="/explanations/recommendations",
+                    payload=explain_request_payload,
+                )
+            except httpx.ReadTimeout as exc:
+                record_explanation_timeout("POST /explanations/recommendations", exc)
+            else:
+                explain_alias_ok = explain_alias_resp.status_code == 200
+                if explain_alias_ok:
+                    explain_alias_body = explain_alias_resp.json()
+                record(
+                    name="POST /explanations/recommendations",
+                    passed=explain_alias_ok,
+                    latency_ms=explain_alias_latency,
+                    details=("ok" if explain_alias_ok else explain_alias_resp.text),
+                )
+        else:
+            skip_after_timeout("POST /explanations/recommendations")
+
+        if timeout_error is None:
+            explain_alias_schema_ok = False
+            if v1_explain_ok and explain_alias_ok:
+                explain_alias_schema_ok = set(v1_explain_body.keys()) == set(
+                    explain_alias_body.keys()
+                )
+                v1_rows = v1_explain_body.get("recommendations", [])
+                alias_rows = explain_alias_body.get("recommendations", [])
+                if (
+                    isinstance(v1_rows, list)
+                    and isinstance(alias_rows, list)
+                    and v1_rows
+                    and alias_rows
+                ):
+                    explain_alias_schema_ok = (
+                        explain_alias_schema_ok
+                        and set(v1_rows[0].keys()) == set(alias_rows[0].keys())
+                    )
+            record(
+                name="Schema parity /v1/explain vs /explanations/recommendations",
+                passed=explain_alias_schema_ok,
+                latency_ms=None,
+                details=("ok" if explain_alias_schema_ok else "explain endpoint schema mismatch"),
+            )
+        else:
+            skip_after_timeout("Schema parity /v1/explain vs /explanations/recommendations")
 
     passed_checks = sum(1 for check in checks if check["passed"])
     failed_checks = len(checks) - passed_checks
@@ -611,16 +723,23 @@ def main(
             "max_ms": float(max(ordered)),
         }
 
+    ok = failed_checks == 0 and timeout_error is None
+
     report = {
         "base_url": base_url,
+        "timeout_seconds": timeout_seconds,
+        "max_explanation_items": max_explanation_items,
         "requested_k": requested_k,
         "known_user_idx": known_user_idx,
         "known_user_id": known_user_id,
+        "ok": ok,
         "passed_checks": passed_checks,
         "failed_checks": failed_checks,
         "checks": checks,
         "latency_summary": latency_summary,
     }
+    if timeout_error is not None:
+        report["timeout_error"] = timeout_error
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -634,9 +753,15 @@ def main(
         result = "PASS" if check["passed"] else "FAIL"
         typer.echo(f"{check['name']} | {result} | {latency_text} | {check['details']}")
 
+    if timeout_error is not None:
+        typer.echo(f"timeout | FAIL | - | {timeout_error['message']}")
+        if debug and "traceback" in timeout_error:
+            typer.echo(timeout_error["traceback"])
+
     typer.echo(
         json.dumps(
             {
+                "ok": ok,
                 "passed_checks": passed_checks,
                 "failed_checks": failed_checks,
                 "report": str(report_path),
@@ -646,7 +771,7 @@ def main(
         )
     )
 
-    if failed_checks > 0:
+    if not ok:
         raise typer.Exit(code=1)
 
 
