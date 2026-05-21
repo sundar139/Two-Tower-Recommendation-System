@@ -54,9 +54,13 @@ Implemented in Step 6 (FastAPI serving layer):
 - Typed serving config (`configs/serving.yaml`) and runtime app wiring
 - Artifact registry for residual retriever, FAISS bundle, and neural ranker
 - Recommendation service with deterministic two-stage scorer policy application
-- FastAPI endpoints for health, readiness, and recommendations
+- Contract-aligned endpoint aliases (`/health`, `/ready`, `/metadata`, `/recommendations`, `/users/{user_id}/history`) with backward-compatible legacy paths
+- Cold-start popularity fallback behavior with explicit `cold_start` response flag
+- Request alias support for snake_case and camelCase payloads
 - Typed API schemas and structured error responses
 - Local runtime helper (`scripts/run_api.py`) and smoke test (`scripts/smoke_test_api.py`)
+- Full API validation script (`scripts/validate_serving_api.py`) with JSON report output
+- Local latency benchmark script (`scripts/benchmark_serving_api.py`) with p50/p95/max summaries
 - Serving-focused test coverage for config, registry, scorer, errors, and API behavior
 
 Not yet implemented in this step:
@@ -215,9 +219,21 @@ Smoke test:
 uv run python scripts/smoke_test_api.py --base-url http://127.0.0.1:8000 --user-idx 0 --top-k 20 --require-ready
 ```
 
+Contract validation:
+
+```powershell
+uv run python scripts/validate_serving_api.py --base-url http://127.0.0.1:8000 --known-user-idx 0 --k 10
+```
+
+Latency benchmark:
+
+```powershell
+uv run python scripts/benchmark_serving_api.py --base-url http://127.0.0.1:8000 --num-users 50 --k 10
+```
+
 Serving workflow details:
 
-- `docs/fastapi_serving.md`
+- `docs/serving_api.md`
 
 ## Full Residual Validation Commands
 
@@ -434,6 +450,8 @@ Do not commit generated data or experiment artifacts:
 
 Transformer limitations currently in scope:
 
-- no contrastive learning yet
-- no FastAPI endpoints yet
+- CL retraining remains experimental and is not part of serving
 - no Ollama explanation endpoints yet
+- no Docker packaging yet
+- no cloud deployment yet
+- no authentication

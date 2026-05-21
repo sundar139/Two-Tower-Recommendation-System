@@ -69,6 +69,15 @@ Test metrics (evaluated only after validation selection):
 - mandatory guards: passed
 - recall guard: passed (`recall50_relative_drop_vs_popularity_le_5pct=true`)
 
+## Step 6B Serving Integration
+
+Step 6B serving uses this exact selected scorer policy for known users:
+
+- `ranker_topk_popularity_backfill`
+- `alpha=1.0`, `beta=0.1`, `gamma=0.0`, `top_k_focus=20`
+
+Unknown users are handled via serving-only popularity fallback (`scorer_policy=popularity_fallback`) when `allow_cold_start=true`. This fallback does not change the selected Step 5D production scorer decision.
+
 ## Reports
 
 - `artifacts/reports/production_scorer_selection.json`
