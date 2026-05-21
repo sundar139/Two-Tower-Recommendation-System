@@ -1,4 +1,4 @@
-"""Validate Step 6B serving API contract against a live local server."""
+"""Validate Step 7B serving API contract against a live local server."""
 
 from __future__ import annotations
 
@@ -135,6 +135,10 @@ def main(
                 "model_artifacts",
                 "selected_scorer_weights",
                 "approved_step5d_metrics",
+                "explanations_enabled",
+                "explanation_provider",
+                "chat_model",
+                "fail_open",
             }
             metadata_ok = required_metadata.issubset(set(metadata_body.keys()))
         record(
@@ -152,6 +156,7 @@ def main(
             "k": requested_k,
             "exclude_seen": True,
             "allow_cold_start": False,
+            "include_explanations": False,
         }
         rec_resp, rec_latency = _request(
             client,
@@ -166,6 +171,18 @@ def main(
             passed=rec_ok,
             latency_ms=rec_latency,
             details=("ok" if rec_ok else rec_resp.text),
+        )
+
+        include_false_ok = rec_ok and rec_body.get("explanation_status") == "disabled"
+        record(
+            name="include_explanations=false remains disabled",
+            passed=include_false_ok,
+            latency_ms=None,
+            details=(
+                "ok"
+                if include_false_ok
+                else "response missing explanation_status=disabled for include_explanations=false"
+            ),
         )
 
         v1_resp, v1_latency = _request(
@@ -195,6 +212,84 @@ def main(
             passed=schema_match,
             latency_ms=None,
             details=("ok" if schema_match else "response schema mismatch"),
+        )
+
+        explanation_limit = max(1, min(3, requested_k))
+        explain_payload = {
+            "user_idx": known_user_idx,
+            "k": requested_k,
+            "exclude_seen": True,
+            "allow_cold_start": False,
+            "include_explanations": True,
+            "explanation_style": "concise",
+            "max_explanation_items": explanation_limit,
+        }
+        explain_resp, explain_latency = _request(
+            client,
+            method="POST",
+            path="/recommendations",
+            payload=explain_payload,
+        )
+        explain_body: dict[str, Any] = (
+            explain_resp.json() if explain_resp.status_code == 200 else {}
+        )
+
+        explanations_enabled = bool(metadata_body.get("explanations_enabled", False))
+        allowed_statuses = {"generated", "unavailable", "failed"}
+        if not explanations_enabled:
+            allowed_statuses = {"disabled"}
+
+        explain_status = explain_body.get("explanation_status")
+        explain_ok = (
+            explain_resp.status_code == 200
+            and isinstance(explain_body.get("recommendations"), list)
+            and explain_status in allowed_statuses
+        )
+        record(
+            name="POST /recommendations include_explanations=true",
+            passed=explain_ok,
+            latency_ms=explain_latency,
+            details=("ok" if explain_ok else explain_resp.text),
+        )
+
+        explain_count_ok = True
+        if explain_ok and explain_status == "generated":
+            explained_rows = explain_body.get("recommendations", [])
+            explained_count = sum(
+                1
+                for row in explained_rows
+                if isinstance(row.get("explanation"), str) and row["explanation"]
+            )
+            explain_count_ok = explained_count <= explanation_limit
+        record(
+            name="Explanation count respects max_explanation_items",
+            passed=explain_count_ok,
+            latency_ms=None,
+            details=(
+                "ok"
+                if explain_count_ok
+                else "generated explanation count exceeded max_explanation_items"
+            ),
+        )
+
+        explanation_order_ok = False
+        if rec_ok and explain_ok:
+            baseline_ids = [
+                row["movieId"]
+                for row in rec_body.get("recommendations", [])
+                if isinstance(row, dict) and isinstance(row.get("movieId"), int)
+            ]
+            explained_ids = [
+                row["movieId"]
+                for row in explain_body.get("recommendations", [])
+                if isinstance(row, dict) and isinstance(row.get("movieId"), int)
+            ]
+            explanation_order_ok = baseline_ids == explained_ids
+        record(
+            name="Explanations do not reorder recommendations",
+            passed=explanation_order_ok,
+            latency_ms=None,
+            details=("ok" if explanation_order_ok else "ranking order changed with explanations"),
         )
 
         resolved_user_id = known_user_id
@@ -288,6 +383,33 @@ def main(
             passed=unknown_true_ok,
             latency_ms=unknown_true_latency,
             details=("ok" if unknown_true_ok else unknown_true_resp.text),
+        )
+
+        unknown_explain_resp, unknown_explain_latency = _request(
+            client,
+            method="POST",
+            path="/recommendations",
+            payload={
+                "user_id": unknown_user_id,
+                "k": requested_k,
+                "allow_cold_start": True,
+                "include_explanations": True,
+                "explanation_style": "concise",
+                "max_explanation_items": explanation_limit,
+            },
+        )
+        unknown_explain_ok = False
+        if unknown_explain_resp.status_code == 200:
+            unknown_explain_body = unknown_explain_resp.json()
+            unknown_explain_ok = bool(unknown_explain_body.get("cold_start", False))
+            unknown_explain_ok = unknown_explain_ok and (
+                unknown_explain_body.get("explanation_status") in allowed_statuses
+            )
+        record(
+            name="Unknown user with explanations fail-open",
+            passed=unknown_explain_ok,
+            latency_ms=unknown_explain_latency,
+            details=("ok" if unknown_explain_ok else unknown_explain_resp.text),
         )
 
         unknown_false_resp, unknown_false_latency = _request(
@@ -405,6 +527,73 @@ def main(
             details=("ok" if count_ok else "returned rows differ from requested k"),
         )
 
+        explain_request_payload: dict[str, Any] = {
+            "top_k": requested_k,
+            "style": "concise",
+            "max_explanation_items": explanation_limit,
+        }
+        if resolved_user_id is not None:
+            explain_request_payload["user_id"] = resolved_user_id
+        else:
+            explain_request_payload["user_idx"] = known_user_idx
+
+        v1_explain_resp, v1_explain_latency = _request(
+            client,
+            method="POST",
+            path="/v1/explain",
+            payload=explain_request_payload,
+        )
+        v1_explain_body: dict[str, Any] = (
+            v1_explain_resp.json() if v1_explain_resp.status_code == 200 else {}
+        )
+        v1_explain_ok = (
+            v1_explain_resp.status_code == 200
+            and isinstance(v1_explain_body.get("recommendations"), list)
+            and v1_explain_body.get("explanation_status") in allowed_statuses
+        )
+        record(
+            name="POST /v1/explain",
+            passed=v1_explain_ok,
+            latency_ms=v1_explain_latency,
+            details=("ok" if v1_explain_ok else v1_explain_resp.text),
+        )
+
+        explain_alias_resp, explain_alias_latency = _request(
+            client,
+            method="POST",
+            path="/explanations/recommendations",
+            payload=explain_request_payload,
+        )
+        explain_alias_ok = explain_alias_resp.status_code == 200
+        record(
+            name="POST /explanations/recommendations",
+            passed=explain_alias_ok,
+            latency_ms=explain_alias_latency,
+            details=("ok" if explain_alias_ok else explain_alias_resp.text),
+        )
+
+        explain_alias_schema_ok = False
+        if v1_explain_ok and explain_alias_ok:
+            explain_alias_body = explain_alias_resp.json()
+            explain_alias_schema_ok = set(v1_explain_body.keys()) == set(explain_alias_body.keys())
+            v1_rows = v1_explain_body.get("recommendations", [])
+            alias_rows = explain_alias_body.get("recommendations", [])
+            if (
+                isinstance(v1_rows, list)
+                and isinstance(alias_rows, list)
+                and v1_rows
+                and alias_rows
+            ):
+                explain_alias_schema_ok = explain_alias_schema_ok and set(v1_rows[0].keys()) == set(
+                    alias_rows[0].keys()
+                )
+        record(
+            name="Schema parity /v1/explain vs /explanations/recommendations",
+            passed=explain_alias_schema_ok,
+            latency_ms=None,
+            details=("ok" if explain_alias_schema_ok else "explain endpoint schema mismatch"),
+        )
+
     passed_checks = sum(1 for check in checks if check["passed"])
     failed_checks = len(checks) - passed_checks
 
@@ -436,7 +625,7 @@ def main(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
 
-    typer.echo("Step 6B Serving API Validation")
+    typer.echo("Step 7B Serving API Validation")
     typer.echo("check | result | latency_ms | details")
     for check in checks:
         latency_text = "-"
