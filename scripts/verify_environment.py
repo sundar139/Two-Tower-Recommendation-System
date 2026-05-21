@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -58,44 +59,87 @@ def _check_torch_cuda() -> list[CheckResult]:
 	]
 
 
-def _check_ollama() -> CheckResult:
-	try:
-		resp = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
-		if resp.status_code == 200:
-			payload = resp.json()
-			models = payload.get("models", []) if isinstance(payload, dict) else []
-			available = {
-				str(model.get("name", "")).strip()
-				for model in models
-				if isinstance(model, dict)
-			}
-			missing = [name for name in REQUIRED_OLLAMA_MODELS if name not in available]
-			if not missing:
-				return CheckResult(
-					"ollama",
-					"PASS",
-					"reachable and required models installed",
-					False,
-				)
+def _ollama_base_urls() -> list[str]:
+	configured = [
+		os.getenv("OLLAMA_BASE_URL"),
+		os.getenv("OLLAMA_HOST"),
+		"http://localhost:11434",
+		"http://127.0.0.1:11434",
+	]
+	urls: list[str] = []
+	for raw_url in configured:
+		if raw_url is None:
+			continue
+		candidate = raw_url.strip().rstrip("/")
+		if candidate and candidate not in urls:
+			urls.append(candidate)
+	return urls
 
-			pull_lines = "\n".join([f"ollama pull {name}" for name in missing])
+
+def _ollama_available_models(base_url: str) -> tuple[set[str] | None, str | None]:
+	try:
+		resp = httpx.get(f"{base_url}/api/tags", timeout=2.0)
+	except Exception as exc:  # noqa: BLE001
+		return None, f"{base_url} unreachable: {exc}"
+
+	if resp.status_code != 200:
+		return None, f"{base_url} unexpected status: {resp.status_code}"
+
+	payload = resp.json()
+	models = payload.get("models", []) if isinstance(payload, dict) else []
+	available = {
+		str(model.get("name", "")).strip() for model in models if isinstance(model, dict)
+	}
+	return available, None
+
+
+def _check_ollama() -> CheckResult:
+	endpoint_errors: list[str] = []
+	best_url: str | None = None
+	best_available: set[str] = set()
+
+	for base_url in _ollama_base_urls():
+		available, error = _ollama_available_models(base_url)
+		if error is not None:
+			endpoint_errors.append(error)
+			continue
+
+		if available is None:
+			continue
+
+		missing = [name for name in REQUIRED_OLLAMA_MODELS if name not in available]
+		if not missing:
 			return CheckResult(
 				"ollama",
-				"WARN",
-				"reachable but missing required models: "
-				f"{', '.join(missing)}\nInstall with:\n{pull_lines}",
+				"PASS",
+				f"reachable at {base_url} and required models installed",
 				False,
 			)
-		return CheckResult("ollama", "WARN", f"unexpected status: {resp.status_code}", False)
-	except Exception as exc:  # noqa: BLE001
-		pull_lines = "\n".join([f"ollama pull {name}" for name in REQUIRED_OLLAMA_MODELS])
+
+		if len(available) > len(best_available):
+			best_available = available
+			best_url = base_url
+
+	pull_lines = "\n".join([f"ollama pull {name}" for name in REQUIRED_OLLAMA_MODELS])
+	if best_url is not None:
+		missing = [name for name in REQUIRED_OLLAMA_MODELS if name not in best_available]
 		return CheckResult(
 			"ollama",
 			"WARN",
-			"offline or unreachable: "
-			f"{exc}\nWhen online, ensure models are installed:\n{pull_lines}",
+			"reachable at "
+			f"{best_url} but missing required models: {', '.join(missing)}"
+			f"\nInstall with:\n{pull_lines}",
 			False,
 		)
+
+	error_detail = "; ".join(endpoint_errors) if endpoint_errors else "no endpoints checked"
+	return CheckResult(
+		"ollama",
+		"WARN",
+		"offline or unreachable: "
+		f"{error_detail}\nWhen online, ensure models are installed:\n{pull_lines}",
+		False,
+	)
 
 
 def collect_results(include_ollama: bool = True) -> list[CheckResult]:

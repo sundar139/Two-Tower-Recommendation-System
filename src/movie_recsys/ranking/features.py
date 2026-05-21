@@ -835,7 +835,8 @@ def build_ranker_features(
 				chunk_progress,
 				disk_path=ranker_cfg.paths.ranker_feature_dir,
 			)
-			if should_stop_for_memory(
+			has_remaining_chunks = (source_index + 1) < len(source_paths)
+			if has_remaining_chunks and should_stop_for_memory(
 				ranker_cfg.max_ram_percent,
 				ranker_cfg.max_pagefile_percent,
 				disk_path=ranker_cfg.paths.ranker_feature_dir,
