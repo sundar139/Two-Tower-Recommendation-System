@@ -435,6 +435,11 @@ Contrastive-learning note:
 
 The contrastive component was inspired by CL-EPIDTN-style contrastive recommendation ideas, but this repository does not claim a full paper reproduction.
 
+## Author
+
+**Rohith Sundar Jonnalagadda**  
+[LinkedIn](https://www.linkedin.com/in/rohithsundarj/) · MS Computer Science, Kennesaw State University
+
 ## License
 
-This project includes an MIT license. See [LICENSE](LICENSE).
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
