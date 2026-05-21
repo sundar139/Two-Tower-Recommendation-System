@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
@@ -23,6 +25,7 @@ class RecommendationItem(BaseModel):
     popularity_score: float
     rank_position: int = Field(ge=1)
     scorer_policy: str
+    explanation: str | None = None
 
 
 class RecommendRequest(BaseModel):
@@ -62,6 +65,19 @@ class RecommendRequest(BaseModel):
         ge=1,
         validation_alias=AliasChoices("candidate_top_k", "candidateTopK"),
     )
+    include_explanations: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("include_explanations", "includeExplanations"),
+    )
+    explanation_style: Literal["concise", "detailed"] = Field(
+        default="concise",
+        validation_alias=AliasChoices("explanation_style", "explanationStyle"),
+    )
+    max_explanation_items: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("max_explanation_items", "maxExplanationItems"),
+    )
 
 
 class RecommendResponse(BaseModel):
@@ -74,6 +90,8 @@ class RecommendResponse(BaseModel):
     k: int
     cold_start: bool
     scorer_policy: str
+    explanation_status: Literal["disabled", "generated", "unavailable", "failed"] = "disabled"
+    overall_explanation: str | None = None
     recommendations: list[RecommendationItem]
     debug: dict[str, object] | None = None
 
@@ -127,6 +145,10 @@ class MetadataResponse(BaseModel):
     model_artifacts: dict[str, str]
     selected_scorer_weights: dict[str, float | int]
     approved_step5d_metrics: Step5DMetricsSummary
+    explanations_enabled: bool
+    explanation_provider: str
+    chat_model: str
+    fail_open: bool
 
 
 class RootResponse(BaseModel):
@@ -140,6 +162,62 @@ class RootResponse(BaseModel):
     health_path: str
     ready_path: str
     recommend_path: str
+
+
+class ExplainRequest(BaseModel):
+    """Request payload for dedicated recommendation explanation endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    user_idx: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("user_idx", "userIdx"),
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        validation_alias=AliasChoices("top_k", "k"),
+    )
+    exclude_seen: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("exclude_seen", "excludeSeen"),
+    )
+    allow_cold_start: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("allow_cold_start", "allowColdStart"),
+    )
+    candidate_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("candidate_top_k", "candidateTopK"),
+    )
+    include_debug: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("include_debug", "includeDebug"),
+    )
+    style: Literal["concise", "detailed"] = Field(
+        default="concise",
+        validation_alias=AliasChoices("style", "explanation_style", "explanationStyle"),
+    )
+    max_explanation_items: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("max_explanation_items", "maxExplanationItems"),
+    )
+    recommendation_items: list[RecommendationItem] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("recommendation_items", "recommendationItems"),
+    )
+
+
+class ExplainResponse(RecommendResponse):
+    """Response payload for dedicated recommendation explanation endpoint."""
 
 
 class UserHistoryItem(BaseModel):
